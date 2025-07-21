@@ -34,48 +34,40 @@ class BaseUnetConfig:
 
 
 @dataclass
-class MyVitConfig:
-    n_labels: int = 4
-    n_heads: int = 8
-    depth_encoder: int = 3
+class VitBase:
+    """
+    Default parameters of the ViT from Table 1. of `VisionTransformer <http://arxiv.org/abs/2010.11929>`_.
+    """
     patch_size: int = 16
-    mlp_dim: int = 128
+    depth_encoder: int = 12
+    embed_dim: int = 768
+    mlp_dim: int = 3072
+    n_heads: int = 12
+    dropout_rate: float = 0.0
+
+
+class MyVit(VitBase):
+    n_labels: int = 4
+    patch_size: int = 16
+    depth_encoder: int = 6
     embed_dim: int = 512
+    mlp_dim: int = 128
+    n_heads: int = 8
     dropout_rate: float = 0.0
     num_groups: int = 32  # if GroupNorm is used
 
 
 @dataclass
-class BaseVitConfig:
-    """
-    Default parameters of the ViT from `VisionTransformer <http://arxiv.org/abs/2010.11929>`_.
-    """
-    n_labels: int = 4
-    n_heads: int = 12
-    depth_encoder: int = 12
-    patch_size: int = 16
-    mlp_dim: int = 1024
-    embed_dim: int = 768
-    dropout_rate: float = 0.0
-
-
-@dataclass
-class BestVitConfig(BaseVitConfig):
-    n_heads = 16
-    depth_encoder = 5
-
-
-@dataclass
-class VitLarge(BaseVitConfig):
-    n_heads: int = 16
-    mlp_dim: int = 4096
+class VitLarge(VitBase):
     depth_encoder: int = 24
     embed_dim: int = 1024
+    mlp_dim: int = 4096
+    n_heads: int = 16
 
 
 @dataclass
-class VitHuge(BaseVitConfig):
-    n_heads: int = 16
-    mlp_dim: int = 5120
+class VitHuge(VitBase):
     depth_encoder: int = 32
     embed_dim: int = 1280
+    mlp_dim: int = 5120
+    n_heads: int = 16
