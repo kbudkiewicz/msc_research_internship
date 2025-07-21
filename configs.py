@@ -1,0 +1,81 @@
+import os
+import torch
+
+from dotenv import load_dotenv
+from dataclasses import dataclass
+from torch import Tensor, device
+load_dotenv()
+
+
+@dataclass
+class MlflowConfig:
+    """
+    Tracking username, password and server uri have to be set manually below or in a .env file.
+    """
+    mlflow_experiment_name: str = 'msc_research_internship'
+    mlflow_server_uri: str = os.environ['MLFLOW_SERVER_URI']
+    mlflow_tracking_username: str = os.environ['MLFLOW_TRACKING_USERNAME']
+    mlflow_tracking_passwd: str = os.environ['MLFLOW_TRACKING_PASSWORD']
+
+
+class BaseUnetConfig:
+    """
+    Default parameters of the `UNet <http://arxiv.org/abs/1505.04597>`_.
+    """
+    device: device = device('cuda' if torch.cuda.is_available() else 'cpu')
+    cache: Tensor | list = []
+    lr: float = 1e-4
+    embed_dim: int = 64
+    conv_kwargs: dict = {'kernel_size': 3, 'stride': 1, 'padding': 1}
+    pool_kwargs: dict = {'kernel_size': 2, 'stride': 2, 'padding': 0}  # when downscaling
+    upscale_factor: int = 2
+    channel_factor: int = 2
+    upscale_kwargs: dict = {'scale_factor': upscale_factor, 'mode': 'bilinear', 'align_corners': True}
+
+
+@dataclass
+class MyVitConfig:
+    n_labels: int = 4
+    n_heads: int = 8
+    depth_encoder: int = 3
+    patch_size: int = 16
+    mlp_dim: int = 128
+    embed_dim: int = 512
+    dropout_rate: float = 0.0
+    num_groups: int = 32  # if GroupNorm is used
+
+
+@dataclass
+class BaseVitConfig:
+    """
+    Default parameters of the ViT from `VisionTransformer <http://arxiv.org/abs/2010.11929>`_.
+    """
+    n_labels: int = 4
+    n_heads: int = 12
+    depth_encoder: int = 12
+    patch_size: int = 16
+    mlp_dim: int = 1024
+    embed_dim: int = 768
+    dropout_rate: float = 0.0
+
+
+@dataclass
+class BestVitConfig(BaseVitConfig):
+    n_heads = 16
+    depth_encoder = 5
+
+
+@dataclass
+class VitLarge(BaseVitConfig):
+    n_heads: int = 16
+    mlp_dim: int = 4096
+    depth_encoder: int = 24
+    embed_dim: int = 1024
+
+
+@dataclass
+class VitHuge(BaseVitConfig):
+    n_heads: int = 16
+    mlp_dim: int = 5120
+    depth_encoder: int = 32
+    embed_dim: int = 1280

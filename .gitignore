@@ -1,0 +1,18 @@
+# files
+.env
+test_*
+_*
+*.yml
+*.env
+*.jpg
+*.pdf
+*.csv
+
+# directories
+/.venv
+/.idea
+/tests
+/playground
+/mlruns
+/data/**
+!/data/dataset.py
