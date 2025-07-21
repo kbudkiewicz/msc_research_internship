@@ -223,10 +223,16 @@ class VisionTransformer(nn.Module):
             self.null_token = n_labels
             self.n_labels = n_labels
         self.patch_dim = self.patch_size ** 2     # channel size C is omitted as the input is grayscaled, i.e., C=1
+        if device is None:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        else:
+            self.device = device
 
-        self.pos_embd = SinusoidalEmbedding(self.embed_dim, max_len=int(img_size**2/self.patch_size**2))
+        self.pos_embd = SinusoidalEmbedding(
+            self.embed_dim, max_len=int(img_size**2/self.patch_size**2), device=self.device
+        )
         # additional token for CFG unconditional model training
-        self.label_embd = nn.Embedding(self.n_labels + 1, self.embed_dim)
+        self.label_embd = nn.Embedding(self.n_labels + 1, self.embed_dim, device=self.device)
         self.patch_embd = nn.Sequential(
             Patchify(self.patch_size),  # we flatten the patches and map to ...
             nn.Linear(self.patch_dim, self.embed_dim),
@@ -239,7 +245,8 @@ class VisionTransformer(nn.Module):
                 embed_dim=self.embed_dim,
                 mlp_dim=self.mlp_dim,
                 n_heads=self.n_heads,
-                dropout_rate=self.dropout_rate
+                dropout_rate=self.dropout_rate,
+                device=self.device
             )
             for _ in range(depth_encoder)
         )
@@ -250,8 +257,7 @@ class VisionTransformer(nn.Module):
             nn.Linear(self.embed_dim, self.patch_dim),
         )
 
-        if device:
-            self.to(device)
+        self.to(self.device)
 
     # def _set_config(self, config: object) -> None:
     #     """
@@ -296,8 +302,7 @@ class VisionTransformer(nn.Module):
         # relu
         # max_pool
 
-    @staticmethod
-    def add_timestep_embd(img: Tensor, t: Tensor) -> Tensor:
+    def add_timestep_embd(self, img: Tensor, t: Tensor) -> Tensor:
         """
         Adds a time-step-embedding to the input image.
 
@@ -306,10 +311,10 @@ class VisionTransformer(nn.Module):
         """
         if img.ndim == 4:
             timestep_embd = torch.cat(
-                [torch.full([1, *img.shape[1:]], fill_value=val.item()) for val in t]
+                [torch.full([1, *img.shape[1:]], fill_value=val.item(), device=self.device) for val in t]
             )
         elif img.ndim == 3 or t.ndim == 1:
-            timestep_embd = torch.full(img.shape, fill_value=t.item())
+            timestep_embd = torch.full(img.shape, fill_value=t.item(), device=self.device)
         else:
             raise ValueError(f'Timestep embedding error. Unsupported img shape {img.shape}.')
 

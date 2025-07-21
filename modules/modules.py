@@ -18,6 +18,7 @@ class MlpBlock(nn.Module):
         n_blocks: int = 3,
         activation: nn.Module = nn.ReLU,
         dropout_rate: float = 0.0,
+        device: Optional[torch.device | str] = None,
     ):
         super().__init__()
         block = nn.Sequential(
@@ -29,6 +30,8 @@ class MlpBlock(nn.Module):
         self.mlp = nn.Sequential(
             *nn.ModuleList([block for _ in range(n_blocks)])
         )
+        if device:
+            self.to(device)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.mlp(x)
@@ -49,11 +52,11 @@ class SinusoidalEmbedding(nn.Module):
         self,
         embed_dim: int = 256,
         dropout_p: float = 0.0,
-        max_len: Optional[int] = 512,
-        device: torch.device | str = 'cpu',
+        max_len: int = 512,
+        device: Optional[torch.device | str] = None,
     ):
         super().__init__()
-        self.max_len: int = max_len
+        self.max_len = max_len
         self.embed_dim = embed_dim
         self.dropout = nn.Dropout(dropout_p)
 
@@ -67,6 +70,9 @@ class SinusoidalEmbedding(nn.Module):
         pe[:, 1::2] = torch.cos(k * div_term)
         self.pe = pe.to(device)
         del pe
+
+        if device:
+            self.to(device)
 
     def forward(self, x: Tensor) -> Tensor:
         if x.shape[0] > 1:  # broadcast to (B, seq_len, D)
@@ -95,9 +101,12 @@ class Patchify(nn.Module):
     def __init__(
         self,
         patch_size: int = 16,
+        device: Optional[torch.device | str] = None,
     ):
         super().__init__()
         self.patch_size = patch_size
+        if device:
+            self.to(device)
 
     def __call__(self, img: Tensor, patch_size: Optional[int] = None) -> Tensor:
         """
@@ -142,7 +151,8 @@ class MultiHeadAttention(nn.Module):
         self,
         embed_dim: int,
         n_heads: int = 8,
-        dropout_rate: float = 0.
+        dropout_rate: float = 0.,
+        device: Optional[torch.device | str] = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -156,6 +166,8 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.dropout = nn.Dropout(dropout_rate)
+        if device:
+            self.to(device)
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         r"""
@@ -204,12 +216,13 @@ class TransformerEncoderBlock(nn.Module):
         n_heads: int = 8,
         dropout_rate: float = 0.0,
         mlp_dim: Optional[int] = None,
+        device: Optional[torch.device | str] = None,
     ):
         super().__init__()
-        self.mha = MultiHeadAttention(embed_dim, n_heads=n_heads, dropout_rate=dropout_rate)
-        self.mlp = MlpBlock(in_dim=embed_dim, out_dim=mlp_dim if mlp_dim else embed_dim, dropout_rate=dropout_rate)
-        self.layer_norm1 = nn.LayerNorm(embed_dim)
-        self.layer_norm2 = nn.LayerNorm(embed_dim)
+        self.mha = MultiHeadAttention(embed_dim, n_heads=n_heads, dropout_rate=dropout_rate, device=device)
+        self.mlp = MlpBlock(in_dim=embed_dim, out_dim=mlp_dim if mlp_dim else embed_dim, dropout_rate=dropout_rate, device=device)
+        self.layer_norm1 = nn.LayerNorm(embed_dim, device=device)
+        self.layer_norm2 = nn.LayerNorm(embed_dim, device=device)
 
     def forward(self, x: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         """
@@ -239,7 +252,8 @@ class ConvBlock(nn.Module):
         in_channels: int,
         out_channels: int,
         activation: nn.Module = nn.SiLU,
-        **conv_kwargs
+        device: Optional[torch.device | str] = None,
+        **conv_kwargs,
     ):
         super().__init__()
         self.net = nn.Sequential(
@@ -247,6 +261,8 @@ class ConvBlock(nn.Module):
             nn.Conv2d(in_channels, out_channels, **conv_kwargs),
             nn.GroupNorm(4, out_channels),  # alternatively, nn.BatchNorm(in_channels)
         )
+        if device:
+            self.to(device)
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -275,6 +291,7 @@ class ResBlock(nn.Module, BaseUnetConfig):
         in_channels: int,
         out_channels: int,
         do_upscale: Optional[bool] = None,
+        device: Optional[torch.device | str] = None,
     ):
         super().__init__()
         if do_upscale is not None:
@@ -301,6 +318,8 @@ class ResBlock(nn.Module, BaseUnetConfig):
             nn.SiLU(),
             nn.Linear(self.time_embd_dim, out_channels),
         )
+        if device:
+            self.to(device)
 
     def forward(self, x: Tensor, time_embd: Tensor = None, label_embd: Optional[Tensor] = None) -> Tensor:
         # res = x.clone()
