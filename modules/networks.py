@@ -580,3 +580,154 @@ class FlowMatchingNet(nn.Module):
 
     def get_config(self) -> dict:
         return {k: v for k, v in self.net.__dict__.items() if k[0] != '_'}
+
+class DiffusionNet(nn.Module):
+    """
+    Base class for diffusion networks. The following implementation is heavily based on
+    `Denoising Diffusion Probability Models <https://arxiv.org/abs/2006.11239>`_.
+
+    .. Note::
+        The following conventions from the paper are used.
+        :math:`x_0` is the sample from target distribution, where :math:`x_T` is noise
+
+    Args:
+        model (nn.Module): Diffusion network
+        timesteps (int): Number of diffusion steps
+        beta_1 (Tensor, float, int):
+            Beta schedule. If int or float are provided a constant schedule is instantiated by default.
+        device (torch.device, str, Optional): Device used for computation
+    """
+    def __init__(
+        self,
+        net: nn.Module,
+        timesteps: int,
+        beta_1: Union[float, int] = 1e-4,
+        beta_t: Union[float, int] = 0.02,
+        device: Optional[torch.device | str] = None,
+    ):
+        super().__init__()
+        if device:
+            self.device = device
+        else:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        self.net = net.to(device=device)
+
+        self.n_timesteps = timesteps
+        if isinstance(beta_1, (float, int)) and not isinstance(beta_t, (float, int)):
+            betas = torch.full((timesteps,), beta_1, dtype=torch.float, device=device)
+        else:
+            betas = torch.linspace(beta_1, beta_t, self.n_timesteps, dtype=torch.float, device=device)
+        self.betas = betas
+        self.alphas = 1. - self.betas
+        self.alphas_bar = torch.cumprod(self.alphas, dim=0)
+        self.sqrt_alphas_bar = torch.sqrt(self.alphas_bar)
+        self.sqrt_rev_alphas_bar = torch.sqrt(1 - self.alphas_bar)
+
+    def register_schedule(self, timesteps, betas: Union[Tensor, float, int]):
+        """
+        Register a schedule of alphas and betas for diffusion networks.
+
+        Define a *linear* beta schedule for the forward diffusion process. Default values are from `DDPM`_ paper.
+
+        .. _`DDPM`: https://arxiv.org/abs/2006.11239
+        """
+        if isinstance(betas, (float, int)):
+            betas = torch.full([timesteps,], betas, dtype=torch.float, device=self.device)
+
+        assert betas.shape[0] == self.n_timesteps, 'alphas are not defined for all diffusion steps'
+        self.alphas = 1. - betas
+        self.alphas_bar = torch.cumsum(self.alphas, dim=0)
+        self.sqrt_alphas_bar = torch.sqrt(self.alphas_bar)
+        self.sqrt_rev_alphas_bar = torch.sqrt(1 - self.alphas_bar)
+
+    def forward(
+        self,
+        img: Tensor,
+        t: Union[Tensor, int] = None,
+        labels: Optional[Tensor] = None,
+        noise: Optional[Tensor] = None
+    ) -> Tensor:
+        if not isinstance(t, (Tensor, int)):
+            t = torch.randint(0, self.n_timesteps, [img.shape[0],], dtype=torch.long, device=self.device)
+        x_t = self.sample_q(img, t, noise=noise)     # sample noise from forward trajectory at random t
+
+        return self.net(x_t, t, labels)
+
+    def forward_cfg(
+        self,
+        x_t: Tensor,
+        t: Tensor,
+        labels: Optional[Tensor] = None,
+        guidance_scale: Union[float, Tensor] = 0.,
+    ) -> Tensor:
+        if not isinstance(labels, Tensor):
+            null_labels = None
+        else:
+            null_labels = torch.full_like(labels, self.net.null_token, dtype=torch.int, device=self.device)  # (B, 1)
+        return (1 - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
+
+    def sample_q(self, x_0: Tensor, t: Union[Tensor, int], noise: Optional[Tensor] = None) -> Tensor:
+        r"""
+        Samples an arbitrary :math:`x_t` from forward diffusion trajectory given a sample from the target distribution
+        :math:`x_0`.
+
+        The function takes use of the fact that :math:`x_t` can be sampled at random time-step :math:`t`
+        using a closed form equation (Equation 4. from `DDPM`):
+
+        .. math::
+            q(x_t,x_0) = N(x_t; \sqrt{\bar\alpha_t}x_0, (1-\bar\alpha_t)I)
+
+        Args:
+            x_0 (Tensor): Original image / sample from target distribution. Shape :math:`(B,) C, H, W)`
+            t (Tensor): Arbitrary time-step of the forward diffusion process.
+            noise (Tensor, optional): Noise used to generate :math:`x_t`. Shape equal that of :math:`x_0`. Default: None
+
+        .. note::
+            Code inspired by `DDPM`_ and `this <https://www.youtube.com/watch?v=a4Yfz2FxXiY>`_.
+
+        .. _`DDPM`: https://github.com/hojonathanho/diffusion/blob/master/diffusion_tf/diffusion_utils_2.py#L108
+        """
+        if not isinstance(noise, Tensor):
+            noise = torch.randn_like(x_0, device=self.device)
+        assert noise.shape == x_0.shape
+
+        return self.extract(self.sqrt_alphas_bar, t, x_0) * x_0 + self.extract(self.sqrt_rev_alphas_bar, t, x_0) * noise
+
+    @staticmethod
+    def extract(tensor: Tensor, t: Tensor, desired_shape: Tensor.shape) -> Tensor:
+        # b, *_ = tensor.shape
+        out = tensor.gather(-1, t)
+        while out.ndim < desired_shape.ndim:
+            out = out.contiguous().unsqueeze(-1)
+        return out
+
+    def backprop(
+        self,
+        y1: Tensor,
+        y2: Tensor,
+        loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
+        do_return: bool = False
+    ) -> Tensor | None:
+        """
+        Perform a backpropagation step. If no ``loss_fnc`` is not provided, the loss defaults to MSE.
+
+        Args:
+            y1 (Tensor): Output of forward pass.
+            y2 (Tensor): Expected (true) value.
+            loss_fnc (Callable, nn.Module): Loss function to be minimised.
+            do_return (bool): Whether to return the loss value. Defaults to ``False``.
+        """
+        assert isinstance(loss_fnc, Callable), f'The loss function must be Callable but is {type(loss_fnc)}.'
+        try:
+            loss = loss_fnc(y1, y2)
+        except NameError or TypeError:
+            loss = torch.nn.functional.mse_loss(y1, y2)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 100)
+        self.optimizer.step()
+
+        if do_return:
+            return loss
