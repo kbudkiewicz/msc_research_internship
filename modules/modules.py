@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from torch import Tensor
 from typing import Optional
-from configs import BaseUnetConfig, BaseVitConfig
+from configs import BaseUnetConfig
 
 
 class MlpBlock(nn.Module):

@@ -715,6 +715,63 @@ class DiffusionNet(CustomModel):
 
         return self.extract(self.sqrt_alphas_bar, t, x_0) * x_0 + self.extract(self.sqrt_rev_alphas_bar, t, x_0) * noise
 
+    @torch.no_grad()
+    def sample_img(
+        self,
+        size: int,
+        label: Union[Tensor, int],
+        guidance_scale: float = 0.,
+        steps: Optional[int] = None,
+        x_t: Optional[Tensor] = None,
+    ) -> Tensor:
+        r"""
+        Reconstruct an image given a label from noise.
+
+        Iteratively applies the following function to reconstruct an image with the desired label or class from
+        noise :math:`x_t`:
+
+        .. math::
+            \begin{aligned}
+                &\rule{110mm}{0.5pt}                                                                                  \\
+                &\textbf{for}\  t=T,\ldots,1 \textbf{do}
+                &\hspace{5mm} \textbf{z}\sim N(\textbf{0},\textbf{I})\ \textbf{if} \ t>1 \textbf{else}\ \textbf{z}=
+                \textbf{0} \\
+
+            \end{aligned}
+
+        .. math::
+            \textbf{x}_{t-1} = \frac{1}{\sqrt{\alpha_t}} (x_t - \frac{1-\alpha_t}{\sqrt{1-\bar\alpha_t}}
+            \epsilon_\theta(\textbf{x}_t,t)) + \sigma_t \textbf{z}
+
+        where :math:`\sigma_t=\sqrt{\beta_t}` or :math:`\sigma_t=\tilde{\beta_t}`.
+
+        Args:
+            size (int): Dimensions of the reconstructed image. If ``x_t`` is provided, then ``size`` is overridden.
+            label (Tensor, int): Image label / class. Shape :math:`(B,)`
+            guidance_scale (float): Guidance scale :math:`w` for Classifier Free Guidance. Default: 0.
+            x_t (Tensor, optional): Noise from which the image is reconstructed. Shape :math:`(B,) C, H, W`
+            steps (int, optional): Number of reconstruction steps.
+
+        .. note::
+            This function implements Algorithm 2. from `DDPM <https://arxiv.org/abs/2006.11239>`__.
+        """
+        if isinstance(label, int):
+            label = torch.Tensor([label], device=self.device).long()
+        if not isinstance(steps, int):
+            steps = self.n_timesteps
+        if not isinstance(x_t, Tensor):
+            x_t = torch.rand([1, size, size], device=self.device)
+
+        for t in reversed(range(steps)):
+            t = torch.Tensor([t], device=self.device).long()
+            z = torch.randn_like(x_t, device=self.device) if t > 1 else torch.zeros_like(x_t, device=self.device)
+            a = 1 / torch.sqrt(self.extract(self.alphas, t, x_t))
+            coeff = (1 - self.extract(self.alphas, t, x_t)) / torch.sqrt(self.extract(self.sqrt_rev_alphas_bar, t, x_t))
+            sigma_t = torch.sqrt(self.extract(self.betas, t, x_t))
+            x_prev = a * x_t - coeff * self.forward_cfg(x_t, t, label, guidance_scale) + sigma_t * z
+
+        return x_prev.permute(1, 2, 0).detach().cpu()
+
     @staticmethod
     def extract(tensor: Tensor, t: Tensor, desired_shape: Tensor.shape) -> Tensor:
         # b, *_ = tensor.shape
