@@ -2,8 +2,9 @@ import os
 import torch
 import torch.nn as nn
 
+from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional, Iterable
+from typing import Callable, Optional, Iterable, Union
 from configs import BaseUnetConfig
 from modules.modules import SinusoidalEmbedding, Patchify, TransformerEncoderBlock, ResBlock
 
@@ -349,7 +350,84 @@ class VisionTransformer(nn.Module):
         return img
 
 
-class FlowMatchingNet(nn.Module):
+class CustomModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @abstractmethod
+    def forward_cfg(self, *args, **kwargs) -> Tensor:
+        """
+        Forward pass using classifier-free guidance.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def sample_img(self, *args, **kwargs) -> Tensor:
+        raise NotImplementedError
+
+    def backprop(
+            self,
+            y1: Tensor,
+            y2: Tensor,
+            loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
+            do_return: bool = False
+    ) -> Tensor | None:
+        """
+        Perform a backpropagation step. If no ``loss_fnc`` is not provided, the loss defaults to MSE.
+
+        Args:
+            y1 (Tensor): Output of forward pass.
+            y2 (Tensor): Expected (true) value.
+            loss_fnc (Callable, nn.Module): Loss function to be minimised.
+            do_return (bool): Whether to return the loss value. Defaults to ``False``.
+        """
+        assert isinstance(loss_fnc, Callable), f'The loss function must be Callable but is {type(loss_fnc)}.'
+        try:
+            loss = loss_fnc(y1, y2)
+        except NameError or TypeError:
+            loss = torch.nn.functional.mse_loss(y1, y2)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 100)
+        self.optimizer.step()
+
+        if do_return:
+            return loss
+
+    def save_checkpoint(self, path: str | os.PathLike) -> None:
+        """
+        ``path`` should be a path to the repo root.
+        """
+        if not os.path.exists('./checkpoints'):
+            os.mkdir('./checkpoints')
+        path = os.path.join('./checkpoints', path)
+        self.save_state_dict(path, 'checkpoint.pt')
+
+    def save_state_dict(self, path: str | os.PathLike, filename: Optional[str | os.PathLike] = None) -> None:
+        filename = filename if filename else 'params.pt'
+        if not os.path.exists(path):
+            torch.save(self.state_dict(), filename)
+        else:
+            torch.save(self.state_dict(), os.path.join(path, filename))
+
+    def set_config(self, config: object) -> None:
+        """
+        Set network attributes to those found in ``config``.
+        """
+        if isinstance(config, object):
+            [self.net.__setattr__(k, v) for k, v in config.__dict__.items() if not k.startswith('_')]
+        else:
+            raise TypeError(f'Config must be a dict, but got {type(config)}')
+
+    def get_config(self) -> dict:
+        if self.net.config is not None:
+            return self.net.config
+        else:
+            return {k: v for k, v in self.net.__dict__.items() if not k.startswith('_')}
+
+
+class FlowMatchingNet(CustomModel):
     """
     Flow Matching Net.
 
@@ -383,15 +461,6 @@ class FlowMatchingNet(nn.Module):
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=weight_decay)
         if device:
             self.to(device)
-
-    def set_config(self, config: object) -> None:
-        """
-        Set network attributes to those found in ``config``.
-        """
-        if isinstance(config, object):
-            [self.net.__setattr__(k, v) for k, v in config.__dict__.items() if k[0] != '_']
-        else:
-            raise TypeError(f'Config must be a dict, but got {type(config)}')
 
     def forward(self, x_t: Tensor, t: Tensor, labels: Optional[Tensor] = None) -> Tensor:
         if labels is not None:
@@ -532,56 +601,8 @@ class FlowMatchingNet(nn.Module):
 
         return x1
 
-    def backprop(
-        self,
-        y1: Tensor,
-        y2: Tensor,
-        loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
-        do_return: bool = False
-    ) -> Tensor | None:
-        """
-        Perform a backpropagation step. If no ``loss_fnc`` is not provided, the loss defaults to MSE.
 
-        Args:
-            y1 (Tensor): Output of forward pass.
-            y2 (Tensor): Expected (true) value.
-            loss_fnc (Callable, nn.Module): Loss function to be minimised.
-            do_return (bool): Whether to return the loss value. Defaults to ``False``.
-        """
-        assert isinstance(loss_fnc, Callable), f'The loss function must be Callable but is {type(loss_fnc)}.'
-        try:
-            loss = loss_fnc(y1, y2)
-        except NameError or TypeError:
-            loss = torch.nn.functional.mse_loss(y1, y2)
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 100)
-        self.optimizer.step()
-
-        if do_return:
-            return loss
-
-    def save_checkpoint(self, path: str | os.PathLike) -> None:
-        """
-        ``path`` should be a path to the repo root.
-        """
-        if not os.path.exists('./checkpoints'):
-            os.mkdir('./checkpoints')
-        path = os.path.join('./checkpoints', path)
-        self.save_state_dict(path, 'checkpoint.pt')
-
-    def save_state_dict(self, path: str | os.PathLike, filename: Optional[str | os.PathLike] = None) -> None:
-        filename = filename if filename else 'params.pt'
-        if not os.path.exists(path):
-            torch.save(self.state_dict(), filename)
-        else:
-            torch.save(self.state_dict(), os.path.join(path, filename))
-
-    def get_config(self) -> dict:
-        return {k: v for k, v in self.net.__dict__.items() if k[0] != '_'}
-
-class DiffusionNet(nn.Module):
+class DiffusionNet(CustomModel):
     """
     Base class for diffusion networks. The following implementation is heavily based on
     `Denoising Diffusion Probability Models <https://arxiv.org/abs/2006.11239>`_.
@@ -701,33 +722,3 @@ class DiffusionNet(nn.Module):
         while out.ndim < desired_shape.ndim:
             out = out.contiguous().unsqueeze(-1)
         return out
-
-    def backprop(
-        self,
-        y1: Tensor,
-        y2: Tensor,
-        loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
-        do_return: bool = False
-    ) -> Tensor | None:
-        """
-        Perform a backpropagation step. If no ``loss_fnc`` is not provided, the loss defaults to MSE.
-
-        Args:
-            y1 (Tensor): Output of forward pass.
-            y2 (Tensor): Expected (true) value.
-            loss_fnc (Callable, nn.Module): Loss function to be minimised.
-            do_return (bool): Whether to return the loss value. Defaults to ``False``.
-        """
-        assert isinstance(loss_fnc, Callable), f'The loss function must be Callable but is {type(loss_fnc)}.'
-        try:
-            loss = loss_fnc(y1, y2)
-        except NameError or TypeError:
-            loss = torch.nn.functional.mse_loss(y1, y2)
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 100)
-        self.optimizer.step()
-
-        if do_return:
-            return loss
