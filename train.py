@@ -193,7 +193,7 @@ def train(
                     t = torch.rand(batch_size, 1, 1, 1, device=device)     # (B, 1) -> embd -> +
                     xt = (1 - t) * x0 + t * x1  # (B, D)
                     delta = x1 - x0
-                    loss = model.backprop(model(xt, t, labels, mask), delta, do_return=True)
+                    loss = model.backprop(model(xt, t, labels), delta, do_return=True)
                 elif mode == 'diffusion':
                     loss = model.backprop(model(x1, labels=labels, noise=x0), x1, do_return=True)
 
@@ -211,16 +211,16 @@ def train(
             )
             if epoch % ceil(0.1 * epochs) == 0:
                 mlflow.pytorch.log_model(
-                    pytorch_model=flow, step=epoch, model_type=flow.net.__class__.__name__,
+                    pytorch_model=model, step=epoch, model_type=model.net.__class__.__name__,
                 )
-                mlflow.pytorch.log_state_dict(flow.state_dict(), f'{flow.net.__class__.__name__}')
+                mlflow.pytorch.log_state_dict(model.state_dict(), f'{model.net.__class__.__name__}')
             elif epoch == epochs:
                 mlflow.pytorch.log_model(
-                    pytorch_model=flow, step=epoch, name=f'{flow.net.__class__.__name__}_final',
-                    model_type=flow.net.__class__.__name__
+                    pytorch_model=model, step=epoch, name=f'{model.net.__class__.__name__}_final',
+                    model_type=model.net.__class__.__name__
                 )
-                mlflow.pytorch.log_state_dict(flow.state_dict(), f'{flow.net.__class__.__name__}_final')
-                flow.save_state_dict(experiment_path)
+                mlflow.pytorch.log_state_dict(model.state_dict(), f'{model.net.__class__.__name__}_final')
+                model.save_state_dict(experiment_path)
                 print('Training done.')
 
             # early stopping
@@ -231,13 +231,13 @@ def train(
                     break
 
     except KeyboardInterrupt:
-        flow.save_checkpoint(experiment_path)
+        model.save_checkpoint(experiment_path)
         mlflow.pytorch.log_model(
-            pytorch_model=flow, step=epoch,
-            name=f'{flow.net.__class__.__name__}_checkpoint_{epoch}',
-            model_type=flow.net.__class__.__name__
+            pytorch_model=model, step=epoch,
+            name=f'{model.net.__class__.__name__}_checkpoint_{epoch}',
+            model_type=model.net.__class__.__name__
         )
-        mlflow.pytorch.log_state_dict(flow.state_dict(), f'{flow.net.__class__.__name__}_checkpoint_{epoch}')
+        mlflow.pytorch.log_state_dict(model.state_dict(), f'{model.net.__class__.__name__}_checkpoint_{epoch}')
         exit('Caught KeyboardInterrupt. Saving checkpoint...')
 
 
@@ -247,7 +247,7 @@ def train_diffusion():
 
 
 if __name__ == '__main__':
-    train_flow(
+    train(
         VisionTransformer(
             128,
             depth_encoder=6,
@@ -261,7 +261,7 @@ if __name__ == '__main__':
         epochs=50,
         augmented=True,
         patience=8,
-        config=BaseVitConfig(),
+        config=VitBase(),
         mlflow_config=MlflowConfig
     )
     # train_flow(
