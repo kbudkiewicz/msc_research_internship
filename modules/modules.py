@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from torch import Tensor
 from typing import Optional
-from configs import BaseUnetConfig, BaseVitConfig
+from configs import BaseUnetConfig
 
 
 class MlpBlock(nn.Module):
@@ -15,20 +15,23 @@ class MlpBlock(nn.Module):
         self,
         in_dim: int = 256,
         out_dim: int = 64,
-        n_blocks: int = 3,
+        n_layers: int = 3,
         activation: nn.Module = nn.ReLU,
         dropout_rate: float = 0.0,
         device: Optional[torch.device | str] = None,
     ):
         super().__init__()
         block = nn.Sequential(
-            nn.Linear(in_dim, out_dim),
-            nn.Dropout(dropout_rate),
+            nn.Linear(out_dim, out_dim),
             activation(inplace=True),
-            nn.Linear(out_dim, in_dim),
+            nn.Dropout(dropout_rate),
         )
         self.mlp = nn.Sequential(
-            *nn.ModuleList([block for _ in range(n_blocks)])
+            nn.Linear(in_dim, out_dim),
+            activation(inplace=True),
+            nn.Dropout(dropout_rate),
+            *nn.ModuleList([block for _ in range(n_layers)]),
+            nn.Linear(out_dim, in_dim)
         )
         if device:
             self.to(device)
@@ -65,7 +68,6 @@ class SinusoidalEmbedding(nn.Module):
         )
         k = torch.arange(0, self.max_len, device=device).unsqueeze(1)   # (L, 1)
         pe = torch.zeros(self.max_len, self.embed_dim, device=device)   # (L, D)
-
         pe[:, 0::2] = torch.sin(k * div_term)
         pe[:, 1::2] = torch.cos(k * div_term)
         self.pe = pe.to(device)
@@ -220,7 +222,12 @@ class TransformerEncoderBlock(nn.Module):
     ):
         super().__init__()
         self.mha = MultiHeadAttention(embed_dim, n_heads=n_heads, dropout_rate=dropout_rate, device=device)
-        self.mlp = MlpBlock(in_dim=embed_dim, out_dim=mlp_dim if mlp_dim else embed_dim, dropout_rate=dropout_rate, device=device)
+        self.mlp = MlpBlock(
+            in_dim=embed_dim,
+            out_dim=mlp_dim if mlp_dim else embed_dim,
+            dropout_rate=dropout_rate,
+            device=device
+        )
         self.layer_norm1 = nn.LayerNorm(embed_dim, device=device)
         self.layer_norm2 = nn.LayerNorm(embed_dim, device=device)
 
