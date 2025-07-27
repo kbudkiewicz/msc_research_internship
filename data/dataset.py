@@ -119,7 +119,6 @@ def preprocess(
     create_annotations_file(preprocessed_dir)
     print('Done.')
 
-preprocess(128)
 
 class MRIDataset(Dataset):
     """
@@ -183,7 +182,7 @@ class MRIDataset(Dataset):
         else:
             img_path = self.img_labels.iloc[idx, 0]
         label = torch.tensor(self.img_labels.iloc[idx, 1], dtype=torch.int)
-        img = decode_image(img_path)    # CxHxW,
+        img = decode_image(img_path)    # CxHxW
 
         # normalize to [0, 1]
         if self.transform:

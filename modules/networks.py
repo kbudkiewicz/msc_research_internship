@@ -87,14 +87,6 @@ class Unet(nn.Module):
         self.to(device)
         del dims_r
 
-        # OLD VERSION. CODE self.en AND self.de AS nn.Sequential()
-        # for i in range(len(dims)-1):
-        #     self.encoder.append(DownscaleBlock(dims[i], dims[i + 1]))
-        #     if i == len(dims)-1:
-        #         self.decoder.append(UpscaleBlock(dims[1], dims[0], False))
-        #     else:
-        #         self.decoder.append(UpscaleBlock(dims_r[i], dims_r[i + 1]))
-
     @staticmethod
     def crop(x: Tensor, desired: Tensor) -> Tensor:
         """
@@ -158,7 +150,6 @@ class Unet(nn.Module):
             x += embd   # += (B, D, 1, 1)
 
         # temp = self.timestep_embd(t).contiguous().reshape(x.shape) # TODO: try doing that instead the bottom
-        # temp = self.timestep_embd(t)[..., None, None]
         timestep_embd = torch.cat(
             [torch.full([1, *x.shape[1:]], val.item(), device=self.device) for val in t]
         )
@@ -259,15 +250,6 @@ class VisionTransformer(nn.Module):
 
         self.to(self.device)
 
-    # def _set_config(self, config: object) -> None:
-    #     """
-    #     Set network attributes to those found in ``config``.
-    #     """
-    #     if isinstance(config, object):
-    #         [self.__setattr__(k, v) for k, v in config.__dict__.items() if k[0] != '_']
-    #     else:
-    #         raise TypeError(f'Config must be a dict, but got {type(config)}')
-
     def forward(
         self,
         img: Tensor,
@@ -297,10 +279,6 @@ class VisionTransformer(nn.Module):
         img = self.out_proj(img)    # project back to image shape
 
         return img.view(original_shape)
-        # StdConv
-        # GroupNorm
-        # relu
-        # max_pool
 
     def add_timestep_embd(self, img: Tensor, t: Tensor) -> Tensor:
         """
@@ -457,9 +435,6 @@ class FlowMatchingNet(nn.Module):
             t_start = t_start.view(1, 1).expand(x_t.shape[0], -1)
         elif x_t.ndim == 4:
             t_start = t_start.view(1, 1).expand(x_t.shape[1], -1)
-        # TODO:
-        # temp = t_start.view(1,1)
-        # t_start = t_start[:, None]
         delta_t = t_end - t_start
 
         if guidance_scale:
@@ -580,6 +555,7 @@ class FlowMatchingNet(nn.Module):
 
     def get_config(self) -> dict:
         return {k: v for k, v in self.net.__dict__.items() if k[0] != '_'}
+
 
 class DiffusionNet(nn.Module):
     """
