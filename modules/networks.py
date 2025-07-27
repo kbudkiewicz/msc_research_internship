@@ -381,6 +381,26 @@ class CustomModel(nn.Module):
             null_labels = torch.full_like(labels, self.net.null_token, dtype=torch.int, device=self.device)  # (B, 1)
         return (1 - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
 
+    def get_classifier_free_labels(self, labels: Tensor, rate: float = 0.2) -> Tensor:
+        r"""
+        Get classifier-free labels for the model by randomly setting some labels to a null token. Based off
+        `Classifier-Free Diffusion Guidance <http://arxiv.org/abs/2207.12598>`_. Also see MIT 6.S184 lecture for
+        the implementation.
+
+        The original labels are substituted are replaced with a fixed null token :math:`\emptyset` for training the
+        unconditional classifier. The labels are substituted only if :math:`p_\text{uncond}` is less then a randomly
+        sampled float from [0,1].
+
+        Args:
+            labels (Tensor): Labels for each image. Dtype has to be ``torch.float``.
+            rate (float): Probability of substitution of a conditional image label with a null token.
+        """
+        rate = rate if rate else self.unconditional_rate
+        p_uncond = torch.rand_like(labels.to(torch.float), device=self.device)
+        labels = torch.where(p_uncond < rate, 4., labels)  # 4. as the null token
+
+        return labels.to(torch.int) # labels.long()
+
     @abstractmethod
     def sample_img(self, *args, **kwargs) -> Tensor:
         raise NotImplementedError
@@ -486,26 +506,6 @@ class FlowMatchingNet(CustomModel):
         if labels is not None:
             labels = self.get_classifier_free_labels(labels)
         return self.net(x_t, t, labels)
-
-    def get_classifier_free_labels(self, labels: Tensor, rate: float = 0.2) -> Tensor:
-        r"""
-        Get classifier-free labels for the model by randomly setting some labels to a null token. Based off
-        `Classifier-Free Diffusion Guidance <http://arxiv.org/abs/2207.12598>`_. Also see MIT 6.S184 lecture for
-        the implementation.
-
-        The original labels are substituted are replaced with a fixed null token :math:`\emptyset` for training the
-        unconditional classifier. The labels are substituted only if :math:`p_\text{uncond}` is less then a randomly
-        sampled float from [0,1].
-
-        Args:
-            labels (Tensor): Labels for each image. Dtype has to be ``torch.float``.
-            rate (float): Probability of substitution of a conditional image label with a null token.
-        """
-        rate = rate if rate else self.unconditional_rate
-        p_uncond = torch.rand_like(labels.to(torch.float), device=self.device)
-        labels = torch.where(p_uncond < rate, 4., labels)  # 4. as the null token
-
-        return labels.to(torch.int) # labels.long()
 
     def step(self, x_t: Tensor, t_start: Tensor, t_end: Tensor, guidance_scale: Optional[float] = None) -> Tensor:
         r"""
@@ -666,6 +666,8 @@ class DiffusionNet(CustomModel):
         if not isinstance(t, (Tensor, int)):
             t = torch.randint(0, self.n_timesteps, [img.shape[0],], dtype=torch.long, device=self.device)
         x_t = self.sample_q(img, t, noise=noise)     # sample noise from forward trajectory at random t
+        if labels is not None:
+            labels = self.get_classifier_free_labels(labels)
 
         return self.net(x_t, t, labels)
 
