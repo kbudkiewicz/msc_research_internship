@@ -8,9 +8,9 @@ from tqdm import tqdm
 from math import ceil
 from dotenv import load_dotenv
 from typing import Optional
-from configs import MlflowConfig, BaseVitConfig, BaseUnetConfig
+from configs import *
 from data.dataset import MRIDataset
-from modules.networks import Unet, VisionTransformer, FlowMatchingNet
+from modules.networks import Unet, VisionTransformer, FlowMatchingNet, DiffusionNet
 from utils import compare_imgs, EarlyStopper
 
 from torch import Tensor
@@ -27,6 +27,7 @@ def validate(
         epoch: int,
         batch_size: int,
         val_loader: DataLoader,
+        mode: str,
         # loss_fnc: Optional[Callable[[Tensor, Tensor], Tensor]] = None,
     ):
     """
@@ -40,11 +41,18 @@ def validate(
         x1, labels = batch
         x1, labels = x1.to(model.device), labels.to(model.device)  # x1 = (B, D)
         x0 = torch.randn_like(x1, device=model.device)
-        # t: random [0,1] -> (B, 1, H, W) / as additional channel
-        t = torch.rand(batch_size, 1, 1, 1, device=model.device)  # (B, 1) -> embd -> +
-        xt = (1 - t) * x0 + t * x1  # (B, D)
-        delta = x1 - x0
-        loss = mse_loss(model(xt, t, labels), delta)
+
+        if mode == 'flow-matching':
+            # t: random [0,1] -> (B, 1, H, W) / as additional channel
+            t = torch.rand(batch_size, 1, 1, 1, device=model.device)  # (B, 1) -> embd -> +
+            xt = (1 - t) * x0 + t * x1  # (B, D)
+            delta = x1 - x0
+            loss = mse_loss(model(xt, t, labels), delta)
+        elif mode == 'diffusion':
+            loss = mse_loss(model(x1, labels=labels, noise=x0), x1)
+        else:
+            raise ValueError('Invalid validation mode.')
+
         val_tqdm.set_postfix(validation_loss=f'{loss.item():.8f}')
         val_losses[i] = loss.item()
 
@@ -66,14 +74,15 @@ def validate(
     return mean_val_loss
 
 
-def train_flow(
-        model: torch.nn.Module,
+def train(
+        net: torch.nn.Module,
         img_size: int,
         epochs: int = 1,
         batch_size: int = 64,
         lr: float = 5e-4,
         run_name: str = 'default',
         path: str | os.PathLike = './checkpoints',
+        mode: str = 'flow-matching',
         augmented: bool = True,
         patience: Optional[int] = None,
         config: Optional[object] = None,
@@ -84,7 +93,7 @@ def train_flow(
 
     Args:
         run_name (str): Name of experiment to identify  the run.
-        model (nn.Module): FlowMatching network.
+        net (nn.Module): FlowMatching network.
         img_size (int): Image width on which to train on.
         epochs (int): Number of training epochs. One epoch is equivalent to a full iteration over the dataset.
         batch_size (int): Batch size.
@@ -94,21 +103,25 @@ def train_flow(
         patience (int, optional): Patience for early stopping.
         config (object, optional): Configuration of model parameters
         mlflow_config (object, optional): Config class of Mlflow experiment.
+        mode (str): Type of model to be trained. Either `flow-matching` or `diffusion`.
     """
-    run_name = run_name + f'_{img_size}'
+    run_name = mode + '-' + run_name + f'_{img_size}'
     experiment_path = os.path.join(path, run_name)
     if not os.path.isdir(experiment_path):
         os.mkdir(experiment_path)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    flow = FlowMatchingNet(model, lr, device=device)
+    if mode == 'flow-matching':
+        model = FlowMatchingNet(net, lr, device=device)
+    elif mode == 'diffusion':
+        model = DiffusionNet(net, 1000, lr, device=device)
+    else:
+        raise ValueError('Invalid model mode.')
     if torch.cuda.device_count() > 1:
         print(f'{torch.cuda.device_count()} GPUs available.')
-        flow = DistributedDataParallel(flow)
+        model = DistributedDataParallel(model)
     if config is not None:
-        flow.set_config(config)
-
-    flow.train()
+        model.set_config(config)
 
     if patience:
         early_stopper = EarlyStopper(experiment_path=experiment_path, patience=patience)
@@ -143,10 +156,10 @@ def train_flow(
         mlflow.set_tags({
             'mlflow.runName': run_name,
             'mlflow.user': os.environ['MLFLOW_USER'],
-            'model_type': 'flow-matching'
+            'model_type': mode
         })
     mlflow.log_params({
-        'model_class': flow.net.__class__.__name__,
+        'model_class': model.net.__class__.__name__,
         'model_config': config,
         'img_size': img_size,
         'batch_size': batch_size,
@@ -154,14 +167,14 @@ def train_flow(
         'patience': patience,
         'epochs': epochs,
         'augmented': augmented,
-        'device': flow.device,
+        'device': model.device,
     })
     print(f'Initialization done. Training on {device}...')
 
     # training loop
     try:
+        model.train()
         for epoch in range(epochs):
-            flow.train()
             train_tqdm = tqdm(
                 train_loader,
                 total=len(train_loader),
@@ -175,17 +188,21 @@ def train_flow(
                 x1, labels = batch
                 x1, labels = x1.to(device), labels.to(device)    # x1 = (B, D)
                 x0 = torch.randn_like(x1, device=device)
-                # t: random [0,1] -> (B, 1, H, W) / as additional channel
-                t = torch.rand(batch_size, 1, 1, 1, device=device)     # (B, 1) -> embd -> +
-                xt = (1 - t) * x0 + t * x1  # (B, D)
-                delta = x1 - x0
-                loss = flow.backprop(flow(xt, t, labels), delta, do_return=True)
+
+                if mode == 'flow-matching':
+                    t = torch.rand(batch_size, 1, 1, 1, device=device)     # (B, 1) -> embd -> +
+                    xt = (1 - t) * x0 + t * x1  # (B, D)
+                    delta = x1 - x0
+                    loss = model.backprop(model(xt, t, labels, mask), delta, do_return=True)
+                elif mode == 'diffusion':
+                    loss = model.backprop(model(x1, labels=labels, noise=x0), x1, do_return=True)
+
                 train_tqdm.set_postfix(training_loss=f'{loss.item():.8f}')
                 train_loss[i] = loss.item()
 
             # logging
             mean_train_loss = torch.mean(train_loss)
-            mean_val_loss = validate(flow, epoch, batch_size, val_loader)
+            mean_val_loss = validate(model, epoch, batch_size, val_loader, mode)
             mlflow.log_metrics(
                 {
                     'mean_train_loss': mean_train_loss.item(),
@@ -208,7 +225,7 @@ def train_flow(
 
             # early stopping
             if patience:
-                do_stop = early_stopper.update(flow, mean_val_loss)
+                do_stop = early_stopper.update(model, mean_val_loss)
                 if do_stop:
                     print(f'Stopping early at epoch {epoch}.')
                     break
