@@ -714,15 +714,6 @@ class DiffusionNet(CustomModel):
         noise :math:`x_t`:
 
         .. math::
-            \begin{aligned}
-                &\rule{110mm}{0.5pt}                                                                                  \\
-                &\textbf{for}\  t=T,\ldots,1 \textbf{do}
-                &\hspace{5mm} \textbf{z}\sim N(\textbf{0},\textbf{I})\ \textbf{if} \ t>1 \textbf{else}\ \textbf{z}=
-                \textbf{0} \\
-
-            \end{aligned}
-
-        .. math::
             \textbf{x}_{t-1} = \frac{1}{\sqrt{\alpha_t}} (x_t - \frac{1-\alpha_t}{\sqrt{1-\bar\alpha_t}}
             \epsilon_\theta(\textbf{x}_t,t)) + \sigma_t \textbf{z}
 
