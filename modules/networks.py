@@ -354,12 +354,31 @@ class CustomModel(nn.Module):
     def __init__(self):
         super().__init__()
 
-    @abstractmethod
-    def forward_cfg(self, *args, **kwargs) -> Tensor:
+    def forward_cfg(
+            self,
+            x_t: Tensor,
+            t: Tensor,
+            labels: Optional[Tensor] = None,
+            guidance_scale: Optional[float | Tensor] = None
+    ) -> Tensor:
+        r"""
+        Return Classifier-Free score. Used at *inference time only* for qualitative analysis.
+
+        .. math::
+            \tilde\epsilon_\theta = w\epsilon_\theta(x,c) + (1-w) \epsilon_\theta(x,\emptyset)
+
+        where :math:`\emptyset` is the null token for unconditional training.
+
+        Shape:
+            - Output: Tensor of shape (B, C, H, W)
         """
-        Forward pass using classifier-free guidance.
-        """
-        raise NotImplementedError
+        if labels is None:
+            guidance_scale = 0
+            null_labels = None
+        else:
+            guidance_scale = guidance_scale if guidance_scale else self.guidance_scale
+            null_labels = torch.full_like(labels, self.net.null_token, dtype=torch.int, device=self.device)  # (B, 1)
+        return (1 - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
 
     @abstractmethod
     def sample_img(self, *args, **kwargs) -> Tensor:
@@ -466,32 +485,6 @@ class FlowMatchingNet(CustomModel):
         if labels is not None:
             labels = self.get_classifier_free_labels(labels)
         return self.net(x_t, t, labels)
-
-    def forward_cfg(
-        self,
-        x_t: Tensor,
-        t: Tensor,
-        labels: Optional[Tensor] = None,
-        guidance_scale: Optional[float | Tensor] = None
-    ) -> Tensor:
-        r"""
-        Return Classifier-Free score. Used at *inference time only* for qualitative analysis.
-
-        .. math::
-            \tilde\epsilon_\theta = w\epsilon_\theta(x,c) + (1-w) \epsilon_\theta(x,\emptyset)
-
-        where :math:`\emptyset` is the null token for unconditional training.
-
-        Shape:
-            - Output: Tensor of shape (B, C, H, W)
-        """
-        if labels is None:
-            guidance_scale = 0
-            null_labels = None
-        else:
-            guidance_scale = guidance_scale if guidance_scale else self.guidance_scale
-            null_labels = torch.full_like(labels, self.net.null_token, dtype=torch.int, device=self.device)  # (B, 1)
-        return (1 - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
 
     def get_classifier_free_labels(self, labels: Tensor, rate: float = 0.2) -> Tensor:
         r"""
@@ -674,19 +667,6 @@ class DiffusionNet(CustomModel):
         x_t = self.sample_q(img, t, noise=noise)     # sample noise from forward trajectory at random t
 
         return self.net(x_t, t, labels)
-
-    def forward_cfg(
-        self,
-        x_t: Tensor,
-        t: Tensor,
-        labels: Optional[Tensor] = None,
-        guidance_scale: Union[float, Tensor] = 0.,
-    ) -> Tensor:
-        if not isinstance(labels, Tensor):
-            null_labels = None
-        else:
-            null_labels = torch.full_like(labels, self.net.null_token, dtype=torch.int, device=self.device)  # (B, 1)
-        return (1 - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
 
     def sample_q(self, x_0: Tensor, t: Union[Tensor, int], noise: Optional[Tensor] = None) -> Tensor:
         r"""
