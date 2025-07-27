@@ -222,7 +222,8 @@ class VisionTransformer(nn.Module):
             self.n_heads = n_heads
             self.dropout_rate = dropout_rate
             self.null_token = n_labels
-            self.n_labels = n_labels
+        self.n_labels = n_labels
+        self.n_patches = int(img_size ** 2 / self.patch_size ** 2)
         self.patch_dim = self.patch_size ** 2     # channel size C is omitted as the input is grayscaled, i.e., C=1
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -230,7 +231,7 @@ class VisionTransformer(nn.Module):
             self.device = device
 
         self.pos_embd = SinusoidalEmbedding(
-            self.embed_dim, max_len=int(img_size**2/self.patch_size**2), device=self.device
+            self.embed_dim, max_len=self.n_patches, device=self.device
         )
         # additional token for CFG unconditional model training
         self.label_embd = nn.Embedding(self.n_labels + 1, self.embed_dim, device=self.device)
