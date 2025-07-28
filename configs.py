@@ -13,9 +13,9 @@ class MlflowConfig:
     Tracking username, password and server uri have to be set manually below or in a .env file.
     """
     mlflow_experiment_name: str = 'msc_research_internship'
-    mlflow_server_uri: str = os.environ['MLFLOW_SERVER_URI']
-    mlflow_tracking_username: str = os.environ['MLFLOW_TRACKING_USERNAME']
-    mlflow_tracking_passwd: str = os.environ['MLFLOW_TRACKING_PASSWORD']
+    mlflow_server_uri: str = os.environ.get('MLFLOW_SERVER_URI', None)
+    mlflow_tracking_username: str = os.environ.get('MLFLOW_TRACKING_USERNAME', None)
+    mlflow_tracking_passwd: str = os.environ.get('MLFLOW_TRACKING_PASSWORD', None)
 
 
 class BaseUnetConfig:
@@ -46,13 +46,13 @@ class VitBase:
     dropout_rate: float = 0.0
 
 
-class MyVit(VitBase):
+class MyVit:
     n_labels: int = 4
     patch_size: int = 16
     depth_encoder: int = 6
     embed_dim: int = 512
-    mlp_dim: int = 128
-    n_heads: int = 8
+    mlp_dim: int = 1024
+    n_heads: int = 16
     dropout_rate: float = 0.0
     num_groups: int = 32  # if GroupNorm is used
 

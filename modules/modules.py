@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 
 from torch import Tensor
+from torch.nn import TransformerEncoderLayer
 from typing import Optional
 from configs import BaseUnetConfig
 
@@ -10,27 +11,23 @@ from configs import BaseUnetConfig
 class MlpBlock(nn.Module):
     """
     Default MLP Block for ViT Encoder Block.
+
+    Note by Jonathan: The MLP-Block usually only consists of two linear layers, where we upscale the data to 4*its embedding size,
+    do a nonlinear activation and downscale again to the embedding size.
     """
     def __init__(
         self,
         in_dim: int = 256,
         out_dim: int = 64,
-        n_layers: int = 3,
-        activation: nn.Module = nn.ReLU,
+        activation: nn.Module = nn.GELU,
         dropout_rate: float = 0.0,
         device: Optional[torch.device | str] = None,
     ):
         super().__init__()
-        block = nn.Sequential(
-            nn.Linear(out_dim, out_dim),
-            activation(inplace=True),
-            nn.Dropout(dropout_rate),
-        )
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, out_dim),
-            activation(inplace=True),
+            activation(),
             nn.Dropout(dropout_rate),
-            *nn.ModuleList([block for _ in range(n_layers)]),
             nn.Linear(out_dim, in_dim)
         )
         if device:

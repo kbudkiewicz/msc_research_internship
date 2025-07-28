@@ -3,6 +3,7 @@ import random
 import pandas as pd
 import torch
 import torchvision.transforms.functional as F
+import time
 
 from typing import Any, Callable, Optional, Tuple
 from torch import Tensor
@@ -153,9 +154,12 @@ class MRIDataset(Dataset):
         self.img_labels = pd.read_csv(annotations_file_path, sep=sep)
         self.label_map = data_label_mapping
         self.transform = transform
-        self.random_transforms = random_transforms if random_transforms else (
-            RandomCrop([256]), RandomRotation([-180, 180]), GaussianBlur(kernel_size=11, sigma=10)
-        )
+        # Note by Jonathan: Question. In `train`, you already add random transforms via the `transform` property.
+        # Why do you add further random transforms here? I think it would be better to add them only at one place.
+        #self.random_transforms = random_transforms if random_transforms else (
+        #    RandomCrop([256]), RandomRotation([-180, 180]), GaussianBlur(kernel_size=11, sigma=10)
+        #)
+        self.random_transforms = random_transforms
 
     def apply_random_transform(self, img: Tensor, return_name: bool = False) -> Tuple[Tensor, str]:
         """
@@ -167,6 +171,7 @@ class MRIDataset(Dataset):
         Return:
             Transformed image tensor.
         """
+        print("I think you actually never end up here.")
         transform = random.choice(self.random_transforms)
         if return_name:
             return transform(img), transform.__class__.__name__     # for debugging purposes
@@ -184,11 +189,15 @@ class MRIDataset(Dataset):
         label = torch.tensor(self.img_labels.iloc[idx, 1], dtype=torch.int)
         img = decode_image(img_path)    # CxHxW
 
-        # normalize to [0, 1]
         if self.transform:
             img = self.transform(img)
-        if apply_random_transform:
-            img = self.apply_random_transform(img)
+        #if apply_random_transform:
+        #    img = self.apply_random_transform(img)
+
+        # With the transforms we are using right now, our values are between -1 and 1.
+        # Our transforms do the following, starting with x in [0, 255]
+        # `ConvertToDtype` already divides by 255:  x <- x / 255.
+        # `Normalize` does    x <- (x - 0.5) / 0.5
 
         return img, label.unsqueeze(-1)
 

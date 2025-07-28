@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Iterable
+from typing import Callable, Optional, Iterable, Union
 from configs import BaseUnetConfig
 from modules.modules import SinusoidalEmbedding, Patchify, TransformerEncoderBlock, ResBlock
 
@@ -132,7 +132,7 @@ class Unet(nn.Module):
 
         Shapes:
             - x: :math:`(B, C, H, W)`
-            - t: :math:`(B, 1)\subset[0,1]`
+            - t: :math:`(B, 1) subset [0,1]`
             - labels: :math:`(B, 1)`
         """
         x = self.in_layer(x)
@@ -353,8 +353,8 @@ class FlowMatchingNet(nn.Module):
         super().__init__()
         self.device = device
         self.net = net
-        if config:
-            self.set_config(config)
+        #if config:
+        #    self.set_config(config)  # Note by Jonathan: Why are you doing this? What's the use of it?
         self.guidance_scale = guidance_scale
         self.classifier_free_rate = classifier_free_rate
         self.lr = lr
@@ -373,7 +373,7 @@ class FlowMatchingNet(nn.Module):
 
     def forward(self, x_t: Tensor, t: Tensor, labels: Optional[Tensor] = None) -> Tensor:
         if labels is not None:
-            labels = self.get_classifier_free_labels(labels)
+            labels = self.get_classifier_free_labels(labels, self.classifier_free_rate)
         return self.net(x_t, t, labels)
 
     def forward_cfg(
@@ -399,8 +399,8 @@ class FlowMatchingNet(nn.Module):
             null_labels = None
         else:
             guidance_scale = guidance_scale if guidance_scale else self.guidance_scale
-            null_labels = torch.full_like(labels, self.net.null_token, dtype=torch.int, device=self.device)  # (B, 1)
-        return (1 - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
+            null_labels = torch.full_like(labels, 4, dtype=torch.int, device=self.device)  # (B, 1)
+        return (1. - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
 
     def get_classifier_free_labels(self, labels: Tensor, rate: float = 0.2) -> Tensor:
         r"""
@@ -416,13 +416,11 @@ class FlowMatchingNet(nn.Module):
             labels (Tensor): Labels for each image. Dtype has to be ``torch.float``.
             rate (float): Probability of substitution of a conditional image label with a null token.
         """
-        rate = rate if rate else self.unconditional_rate
-        p_uncond = torch.rand_like(labels.to(torch.float), device=self.device)
-        labels = torch.where(p_uncond < rate, 4., labels)  # 4. as the null token
+        p_uncond = torch.rand((labels.shape[0], 1), device=self.device)
+        labels = torch.where(p_uncond < rate, 4, labels)  # 4. as the null token
+        return labels # labels.long()
 
-        return labels.to(torch.int) # labels.long()
-
-    def step(self, x_t: Tensor, t_start: Tensor, t_end: Tensor, guidance_scale: Optional[float] = None) -> Tensor:
+    def step(self, x_t: Tensor, t_start: Tensor, t_end: Tensor, labels: Tensor, guidance_scale: Optional[float] = None) -> Tensor:
         r"""
         Perform an ODE solving step to reconstruct the image step-by-step. Uses the midpoint solver given by:
 
@@ -431,19 +429,38 @@ class FlowMatchingNet(nn.Module):
 
         See `Flow Matching Guide and Code <https://arxiv.org/abs/2412.06264>`__ for more information.
         """
-        if x_t.ndim == 3:
-            t_start = t_start.view(1, 1).expand(x_t.shape[0], -1)
-        elif x_t.ndim == 4:
-            t_start = t_start.view(1, 1).expand(x_t.shape[1], -1)
+        # Note by jonathan: What's the use of this?
+        #if x_t.ndim == 3:
+        #    t_start = t_start.view(1, 1).expand(x_t.shape[0], -1)
+        #elif x_t.ndim == 4:
+        #    t_start = t_start.view(1, 1).expand(x_t.shape[1], -1)
+
+        # labels in shape (b, 1)
+
         delta_t = t_end - t_start
 
         if guidance_scale:
             return x_t + delta_t * self.forward_cfg(
-                x_t + self.forward_cfg(x_t, t_start, guidance_scale=guidance_scale) * delta_t / 2, t_start + delta_t / 2,
+                x_t + self.forward_cfg(x_t, t_start, labels, guidance_scale=guidance_scale) * (delta_t / 2.), t_start + (delta_t / 2), labels,
                 guidance_scale=guidance_scale
             )
         else:
             return x_t + delta_t * self(x_t + self(x_t, t_start)*delta_t/2, t_start + delta_t/2)
+
+    def sample_single_image(self, img_size: int, n_steps, guidance_scale: float, label: int):
+        """
+            label in 0..3
+        """
+        timesteps = torch.linspace(0., 1., n_steps + 1, device=self.device)
+        x0 = torch.randn((1, 1, img_size, img_size), device=self.device)
+        input = x0
+        for i in range(n_steps):
+            input = self.step(input, timesteps[i], timesteps[i+1],
+                              torch.tensor([[label]], dtype=torch.long, device=self.device),
+                              guidance_scale)
+
+        return input
+
 
     def sample_img(
         self,
@@ -531,7 +548,7 @@ class FlowMatchingNet(nn.Module):
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 100)
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.)
         self.optimizer.step()
 
         if do_return:
