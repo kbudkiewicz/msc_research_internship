@@ -2,8 +2,9 @@ import os
 import torch
 import torch.nn as nn
 
+from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional, Iterable
+from typing import Callable, Optional, Iterable, Union
 from configs import BaseUnetConfig
 from modules.modules import SinusoidalEmbedding, Patchify, TransformerEncoderBlock, ResBlock
 
@@ -212,7 +213,8 @@ class VisionTransformer(nn.Module):
             self.n_heads = n_heads
             self.dropout_rate = dropout_rate
             self.null_token = n_labels
-            self.n_labels = n_labels
+        self.n_labels = n_labels
+        self.n_patches = int(img_size ** 2 / self.patch_size ** 2)
         self.patch_dim = self.patch_size ** 2     # channel size C is omitted as the input is grayscaled, i.e., C=1
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -220,7 +222,7 @@ class VisionTransformer(nn.Module):
             self.device = device
 
         self.pos_embd = SinusoidalEmbedding(
-            self.embed_dim, max_len=int(img_size**2/self.patch_size**2), device=self.device
+            self.embed_dim, max_len=self.n_patches, device=self.device
         )
         # additional token for CFG unconditional model training
         self.label_embd = nn.Embedding(self.n_labels + 1, self.embed_dim, device=self.device)
@@ -327,61 +329,16 @@ class VisionTransformer(nn.Module):
         return img
 
 
-class FlowMatchingNet(nn.Module):
-    """
-    Flow Matching Net.
-
-    Args:
-        net (nn.Module): Neural Network used to approximate the velocity field.
-        guidance_scale (float): Guidance scale. Determines the strength of model conditionality. The higher the value, the higher
-            the model conditioning.
-        classifier_free_rate (float): Probability of substituting conditional tokens for unconditional ones.
-        lr (float): Learning rate.
-        config (object, optional): Configuration object.
-        device (torch.device | str, optional): Device platform used for computation.
-    """
-    def __init__(
-        self,
-        net: nn.Module,
-        guidance_scale: float = 3.,
-        classifier_free_rate: float = 0.1,
-        lr: float = 5e-4,
-        weight_decay: float = 0.0,
-        config: Optional[object] = None,
-        device: Optional[torch.device | str] = None,
-    ):
+class CustomModel(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.device = device
-        self.net = net
-        if config:
-            self.set_config(config)
-        self.guidance_scale = guidance_scale
-        self.classifier_free_rate = classifier_free_rate
-        self.lr = lr
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=weight_decay)
-        if device:
-            self.to(device)
-
-    def set_config(self, config: object) -> None:
-        """
-        Set network attributes to those found in ``config``.
-        """
-        if isinstance(config, object):
-            [self.net.__setattr__(k, v) for k, v in config.__dict__.items() if k[0] != '_']
-        else:
-            raise TypeError(f'Config must be a dict, but got {type(config)}')
-
-    def forward(self, x_t: Tensor, t: Tensor, labels: Optional[Tensor] = None) -> Tensor:
-        if labels is not None:
-            labels = self.get_classifier_free_labels(labels)
-        return self.net(x_t, t, labels)
 
     def forward_cfg(
-        self,
-        x_t: Tensor,
-        t: Tensor,
-        labels: Optional[Tensor] = None,
-        guidance_scale: Optional[float | Tensor] = None
+            self,
+            x_t: Tensor,
+            t: Tensor,
+            labels: Tensor,
+            guidance_scale: float = 1.
     ) -> Tensor:
         r"""
         Return Classifier-Free score. Used at *inference time only* for qualitative analysis.
@@ -394,13 +351,8 @@ class FlowMatchingNet(nn.Module):
         Shape:
             - Output: Tensor of shape (B, C, H, W)
         """
-        if labels is None:
-            guidance_scale = 0
-            null_labels = None
-        else:
-            guidance_scale = guidance_scale if guidance_scale else self.guidance_scale
-            null_labels = torch.full_like(labels, self.net.null_token, dtype=torch.int, device=self.device)  # (B, 1)
-        return (1 - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
+        null_labels = torch.full_like(labels, 4, dtype=torch.int, device=self.device)  # (B, 1)
+        return (1. - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
 
     def get_classifier_free_labels(self, labels: Tensor, rate: float = 0.2) -> Tensor:
         r"""
@@ -416,103 +368,21 @@ class FlowMatchingNet(nn.Module):
             labels (Tensor): Labels for each image. Dtype has to be ``torch.float``.
             rate (float): Probability of substitution of a conditional image label with a null token.
         """
-        rate = rate if rate else self.unconditional_rate
-        p_uncond = torch.rand_like(labels.to(torch.float), device=self.device)
-        labels = torch.where(p_uncond < rate, 4., labels)  # 4. as the null token
+        p_uncond = torch.rand([labels.shape[0], 1], device=self.device)
+        labels = torch.where(p_uncond < rate, 4, labels)  # 4. as the null token
 
-        return labels.to(torch.int) # labels.long()
+        return labels
 
-    def step(self, x_t: Tensor, t_start: Tensor, t_end: Tensor, guidance_scale: Optional[float] = None) -> Tensor:
-        r"""
-        Perform an ODE solving step to reconstruct the image step-by-step. Uses the midpoint solver given by:
-
-        .. math::
-            y_{n+1} = y_n + h*f[t_n + h/2, y_n + h/2*f(t_n,y_n)]
-
-        See `Flow Matching Guide and Code <https://arxiv.org/abs/2412.06264>`__ for more information.
-        """
-        if x_t.ndim == 3:
-            t_start = t_start.view(1, 1).expand(x_t.shape[0], -1)
-        elif x_t.ndim == 4:
-            t_start = t_start.view(1, 1).expand(x_t.shape[1], -1)
-        delta_t = t_end - t_start
-
-        if guidance_scale:
-            return x_t + delta_t * self.forward_cfg(
-                x_t + self.forward_cfg(x_t, t_start, guidance_scale=guidance_scale) * delta_t / 2, t_start + delta_t / 2,
-                guidance_scale=guidance_scale
-            )
-        else:
-            return x_t + delta_t * self(x_t + self(x_t, t_start)*delta_t/2, t_start + delta_t/2)
-
-    def sample_img(
-        self,
-        input_: Tensor | int,
-        n_steps: int = 50,
-        return_reconstruction: bool = False,
-        guidance_scale: Optional[float] = None,
-    ):
-        timesteps = torch.linspace(0., 1., n_steps + 1, device=self.device)
-        if isinstance(input_, Tensor):
-            x0 = torch.randn_like(input_, device=self.device)
-            # reconstruction = torch.randn([n_steps + 1, *input.shape[1:]], device=self.device, requires_grad=False)
-        elif isinstance(input_, int):
-            x0 = torch.randn([1, input_, input_], device=self.device)
-            # reconstruction = torch.randn([n_steps + 1, 1, input, input], device=self.device, requires_grad=False)
-        else:
-            raise TypeError(f'Unexpected type: {type(input_)}')
-
-        for i in range(n_steps):
-            input_ = self.step(x0, timesteps[i], timesteps[i + 1], guidance_scale=guidance_scale)
-
-        if return_reconstruction:
-            reconstruction = torch.randn([n_steps + 1, *x0.shape], device=self.device, requires_grad=False)
-            with torch.no_grad():
-                for i in range(n_steps):
-                    reconstruction[i + 1] = self.step(x0, timesteps[i], timesteps[i + 1], guidance_scale=guidance_scale)
-
-        if return_reconstruction:
-            return input_, reconstruction
-        else:
-            return input_
-
-    def sample_reconstruction(
-        self,
-        arg: Tensor | int,
-        n_steps: int = 10,
-        guidance_scale: Optional[float] = None
-    ) -> Tensor:
-        """
-        Sample a reconstruction by taking multiple ODE steps.
-
-        Args:
-            arg (Tensor, int, Iterable[int]): If ``Tensor``, an image of the same shape will be reconstructed.
-                Otherwise, an ``int`` defining the desired width and height is expected.
-            n_steps (int): Number of reconstruction steps between :math:`x_0` and :math:`x_1`.
-            guidance_scale (float, Optional): Model conditioning strength and its bias towards conditional sample
-                synthesis.
-        """
-        timesteps = torch.linspace(0., 1., n_steps + 1, device=self.device)
-        if isinstance(arg, Tensor):
-            x0 = torch.randn(*arg.shape, device=self.device)
-            x1 = torch.randn([n_steps + 1, *arg.shape], device=self.device)
-        elif isinstance(arg, int or Iterable[int]):
-            x0 = torch.randn([1, arg, arg], device=self.device)
-            x1 = torch.randn([n_steps + 1, 1, arg, arg], device=self.device)
-        else:
-            raise ValueError(f'Unsupported argument type: {type(arg)}')
-
-        for i in range(n_steps):
-            x1[i + 1] = self.step(x0, timesteps[i], timesteps[i + 1], guidance_scale=guidance_scale)
-
-        return x1
+    @abstractmethod
+    def sample_img(self, *args, **kwargs) -> Tensor:
+        raise NotImplementedError
 
     def backprop(
-        self,
-        y1: Tensor,
-        y2: Tensor,
-        loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
-        do_return: bool = False
+            self,
+            y1: Tensor,
+            y2: Tensor,
+            loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
+            do_return: bool = False
     ) -> Tensor | None:
         """
         Perform a backpropagation step. If no ``loss_fnc`` is not provided, the loss defaults to MSE.
@@ -553,11 +423,150 @@ class FlowMatchingNet(nn.Module):
         else:
             torch.save(self.state_dict(), os.path.join(path, filename))
 
+    def set_config(self, config: object) -> None:
+        """
+        Set network attributes to those found in ``config``.
+        """
+        if isinstance(config, object):
+            [self.net.__setattr__(k, v) for k, v in config.__dict__.items() if not k.startswith('_')]
+        else:
+            raise TypeError(f'Config must be a dict, but got {type(config)}')
+
     def get_config(self) -> dict:
-        return {k: v for k, v in self.net.__dict__.items() if k[0] != '_'}
+        if self.net.config is not None:
+            return self.net.config
+        else:
+            return {k: v for k, v in self.net.__dict__.items() if not k.startswith('_')}
 
 
-class DiffusionNet(nn.Module):
+class FlowMatchingNet(CustomModel):
+    """
+    Flow Matching Net.
+
+    Args:
+        net (nn.Module): Neural Network used to approximate the velocity field.
+        guidance_scale (float): Guidance scale. Determines the strength of model conditionality. The higher the value, the higher
+            the model conditioning.
+        classifier_free_rate (float): Probability of substituting conditional tokens for unconditional ones.
+        lr (float): Learning rate.
+        config (object, optional): Configuration object.
+        device (torch.device | str, optional): Device platform used for computation.
+    """
+    def __init__(
+        self,
+        net: nn.Module,
+        guidance_scale: float = 3.,
+        classifier_free_rate: float = 0.1,
+        lr: float = 5e-4,
+        weight_decay: float = 0.0,
+        config: Optional[object] = None,
+        device: Optional[torch.device | str] = None,
+    ):
+        super().__init__()
+        self.device = device
+        self.net = net
+        if config:
+            self.set_config(config)
+        self.guidance_scale = guidance_scale
+        self.classifier_free_rate = classifier_free_rate
+        self.lr = lr
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=weight_decay)
+        if device:
+            self.to(device)
+
+    def forward(self, x_t: Tensor, t: Tensor, labels: Optional[Tensor] = None) -> Tensor:
+        if labels is not None:
+            labels = self.get_classifier_free_labels(labels)
+        return self.net(x_t, t, labels)
+
+    def step(self, x_t: Tensor, t_start: Tensor, t_end: Tensor, labels: Tensor, guidance_scale: Optional[float] = None) -> Tensor:
+        r"""
+        Perform an ODE solving step to reconstruct the image step-by-step. Uses the midpoint solver given by:
+
+        .. math::
+            y_{n+1} = y_n + h*f[t_n + h/2, y_n + h/2*f(t_n,y_n)]
+
+        See `Flow Matching Guide and Code <https://arxiv.org/abs/2412.06264>`__ for more information.
+        """
+        if x_t.ndim == 3:
+            t_start = t_start.view(1, 1).expand(x_t.shape[0], -1)
+        elif x_t.ndim == 4:
+            t_start = t_start.view(1, 1).expand(x_t.shape[1], -1)
+        delta_t = t_end - t_start
+
+        if guidance_scale:
+            return x_t + delta_t * self.forward_cfg(
+                x_t + self.forward_cfg(x_t, t_start, labels, guidance_scale=guidance_scale) * delta_t / 2, t_start + delta_t / 2, labels,
+                guidance_scale=guidance_scale
+            )
+        else:
+            return x_t + delta_t * self(x_t + self(x_t, t_start)*delta_t/2, t_start + delta_t/2)
+
+    def sample_img(
+        self,
+        input_: Tensor | int,
+        labels: Tensor,
+        n_steps: int = 50,
+        return_reconstruction: bool = False,
+        guidance_scale: Optional[float] = None,
+    ):
+        timesteps = torch.linspace(0., 1., n_steps + 1, device=self.device)
+        if isinstance(input_, Tensor):
+            x0 = torch.randn_like(input_, device=self.device)
+            # reconstruction = torch.randn([n_steps + 1, *input.shape[1:]], device=self.device, requires_grad=False)
+        elif isinstance(input_, int):
+            x0 = torch.randn([1, input_, input_], device=self.device)
+            # reconstruction = torch.randn([n_steps + 1, 1, input, input], device=self.device, requires_grad=False)
+        else:
+            raise TypeError(f'Unexpected type: {type(input_)}')
+
+        for i in range(n_steps):
+            input_ = self.step(x0, timesteps[i], timesteps[i + 1], labels, guidance_scale=guidance_scale)
+
+        if return_reconstruction:
+            reconstruction = torch.randn([n_steps + 1, *x0.shape], device=self.device, requires_grad=False)
+            with torch.no_grad():
+                for i in range(n_steps):
+                    reconstruction[i + 1] = self.step(x0, timesteps[i], timesteps[i + 1], labels, guidance_scale=guidance_scale)
+
+        if return_reconstruction:
+            return input_, reconstruction
+        else:
+            return input_
+
+    def sample_reconstruction(
+        self,
+        arg: Tensor | int,
+        n_steps: int = 10,
+        guidance_scale: Optional[float] = None
+    ) -> Tensor:
+        """
+        Sample a reconstruction by taking multiple ODE steps.
+
+        Args:
+            arg (Tensor, int, Iterable[int]): If ``Tensor``, an image of the same shape will be reconstructed.
+                Otherwise, an ``int`` defining the desired width and height is expected.
+            n_steps (int): Number of reconstruction steps between :math:`x_0` and :math:`x_1`.
+            guidance_scale (float, Optional): Model conditioning strength and its bias towards conditional sample
+                synthesis.
+        """
+        timesteps = torch.linspace(0., 1., n_steps + 1, device=self.device)
+        if isinstance(arg, Tensor):
+            x0 = torch.randn(*arg.shape, device=self.device)
+            x1 = torch.randn([n_steps + 1, *arg.shape], device=self.device)
+        elif isinstance(arg, int or Iterable[int]):
+            x0 = torch.randn([1, arg, arg], device=self.device)
+            x1 = torch.randn([n_steps + 1, 1, arg, arg], device=self.device)
+        else:
+            raise ValueError(f'Unsupported argument type: {type(arg)}')
+
+        for i in range(n_steps):
+            x1[i + 1] = self.step(x0, timesteps[i], timesteps[i + 1], guidance_scale=guidance_scale)
+
+        return x1
+
+
+class DiffusionNet(CustomModel):
     """
     Base class for diffusion networks. The following implementation is heavily based on
     `Denoising Diffusion Probability Models <https://arxiv.org/abs/2006.11239>`_.
@@ -627,21 +636,10 @@ class DiffusionNet(nn.Module):
         if not isinstance(t, (Tensor, int)):
             t = torch.randint(0, self.n_timesteps, [img.shape[0],], dtype=torch.long, device=self.device)
         x_t = self.sample_q(img, t, noise=noise)     # sample noise from forward trajectory at random t
+        if labels is not None:
+            labels = self.get_classifier_free_labels(labels)
 
         return self.net(x_t, t, labels)
-
-    def forward_cfg(
-        self,
-        x_t: Tensor,
-        t: Tensor,
-        labels: Optional[Tensor] = None,
-        guidance_scale: Union[float, Tensor] = 0.,
-    ) -> Tensor:
-        if not isinstance(labels, Tensor):
-            null_labels = None
-        else:
-            null_labels = torch.full_like(labels, self.net.null_token, dtype=torch.int, device=self.device)  # (B, 1)
-        return (1 - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
 
     def sample_q(self, x_0: Tensor, t: Union[Tensor, int], noise: Optional[Tensor] = None) -> Tensor:
         r"""
@@ -670,6 +668,54 @@ class DiffusionNet(nn.Module):
 
         return self.extract(self.sqrt_alphas_bar, t, x_0) * x_0 + self.extract(self.sqrt_rev_alphas_bar, t, x_0) * noise
 
+    @torch.no_grad()
+    def sample_img(
+        self,
+        size: int,
+        label: Union[Tensor, int],
+        guidance_scale: float = 0.,
+        steps: Optional[int] = None,
+        x_t: Optional[Tensor] = None,
+    ) -> Tensor:
+        r"""
+        Reconstruct an image given a label from noise.
+
+        Iteratively applies the following function to reconstruct an image with the desired label or class from
+        noise :math:`x_t`:
+
+        .. math::
+            \textbf{x}_{t-1} = \frac{1}{\sqrt{\alpha_t}} (x_t - \frac{1-\alpha_t}{\sqrt{1-\bar\alpha_t}}
+            \epsilon_\theta(\textbf{x}_t,t)) + \sigma_t \textbf{z}
+
+        where :math:`\sigma_t=\sqrt{\beta_t}` or :math:`\sigma_t=\tilde{\beta_t}`.
+
+        Args:
+            size (int): Dimensions of the reconstructed image. If ``x_t`` is provided, then ``size`` is overridden.
+            label (Tensor, int): Image label / class. Shape :math:`(B,)`
+            guidance_scale (float): Guidance scale :math:`w` for Classifier Free Guidance. Default: 0.
+            x_t (Tensor, optional): Noise from which the image is reconstructed. Shape :math:`(B,) C, H, W`
+            steps (int, optional): Number of reconstruction steps.
+
+        .. note::
+            This function implements Algorithm 2. from `DDPM <https://arxiv.org/abs/2006.11239>`__.
+        """
+        if isinstance(label, int):
+            label = torch.Tensor([label], device=self.device).long()
+        if not isinstance(steps, int):
+            steps = self.n_timesteps
+        if not isinstance(x_t, Tensor):
+            x_t = torch.rand([1, size, size], device=self.device)
+
+        for t in reversed(range(steps)):
+            t = torch.Tensor([t], device=self.device).long()
+            z = torch.randn_like(x_t, device=self.device) if t > 1 else torch.zeros_like(x_t, device=self.device)
+            a = 1 / torch.sqrt(self.extract(self.alphas, t, x_t))
+            coeff = (1 - self.extract(self.alphas, t, x_t)) / torch.sqrt(self.extract(self.sqrt_rev_alphas_bar, t, x_t))
+            sigma_t = torch.sqrt(self.extract(self.betas, t, x_t))
+            x_prev = a * x_t - coeff * self.forward_cfg(x_t, t, label, guidance_scale) + sigma_t * z
+
+        return x_prev.permute(1, 2, 0).detach().cpu()
+
     @staticmethod
     def extract(tensor: Tensor, t: Tensor, desired_shape: Tensor.shape) -> Tensor:
         # b, *_ = tensor.shape
@@ -677,33 +723,3 @@ class DiffusionNet(nn.Module):
         while out.ndim < desired_shape.ndim:
             out = out.contiguous().unsqueeze(-1)
         return out
-
-    def backprop(
-        self,
-        y1: Tensor,
-        y2: Tensor,
-        loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
-        do_return: bool = False
-    ) -> Tensor | None:
-        """
-        Perform a backpropagation step. If no ``loss_fnc`` is not provided, the loss defaults to MSE.
-
-        Args:
-            y1 (Tensor): Output of forward pass.
-            y2 (Tensor): Expected (true) value.
-            loss_fnc (Callable, nn.Module): Loss function to be minimised.
-            do_return (bool): Whether to return the loss value. Defaults to ``False``.
-        """
-        assert isinstance(loss_fnc, Callable), f'The loss function must be Callable but is {type(loss_fnc)}.'
-        try:
-            loss = loss_fnc(y1, y2)
-        except NameError or TypeError:
-            loss = torch.nn.functional.mse_loss(y1, y2)
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 100)
-        self.optimizer.step()
-
-        if do_return:
-            return loss
