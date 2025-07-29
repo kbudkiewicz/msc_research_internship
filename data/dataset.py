@@ -1,5 +1,4 @@
 import os
-import random
 import pandas as pd
 import torch
 import torchvision.transforms.functional as F
@@ -8,7 +7,6 @@ from typing import Any, Callable, Optional, Tuple
 from torch import Tensor
 from torch.utils.data import Dataset
 from torchvision.io import decode_image, write_jpeg, ImageReadMode
-from torchvision.transforms import RandomCrop, RandomRotation, GaussianBlur
 
 data_label_mapping = {
     'notumor': 0,
@@ -38,7 +36,6 @@ def create_annotations_file(
     """
     destination_path = os.path.join(path, filename)
     assert os.path.exists(path), f'The path {path} does not exist. Make sure path is an existing directory.'
-        # os.makedirs(path)
 
     with open(destination_path, 'w') as f:
         for root, _, files in os.walk(path):
@@ -79,16 +76,16 @@ def preprocess(
     if not os.path.isdir(preprocessed_dir):
         print(f'Path {preprocessed_dir} does not exist.\nCreating directory {preprocessed_dir}...')
         os.mkdir(preprocessed_dir)
-        # TODO: redo for generality
-        os.mkdir(preprocessed_dir + f'/training')
-        os.mkdir(preprocessed_dir + f'/training/glioma')
-        os.mkdir(preprocessed_dir + f'/training/meningioma')
-        os.mkdir(preprocessed_dir + f'/training/notumor')
-        os.mkdir(preprocessed_dir + f'/training/pituitary')
-        print(f'Directory {preprocessed_dir} created.')
+        os.mkdir(os.path.join(preprocessed_dir, 'training'))
 
     # preprocess every file from /dir_path into /preprocessed
     for dirpath, dirnames, filenames in os.walk(original_dir_path):
+        for dir in dirnames:
+            sub_dir = os.path.join(dirpath, dir).replace('./original', preprocessed_dir)
+            if not os.path.isdir(sub_dir):
+                os.mkdir(sub_dir)
+                print(f'Directory {sub_dir} created.')
+
         for filename in filenames:
             if filename.endswith('.jpg'):
                 img_path = os.path.join(dirpath, filename)
@@ -144,7 +141,6 @@ class MRIDataset(Dataset):
         sep: str = ',',
         img_dir: Optional[os.PathLike | str] = None,
         transform: Optional[Callable] = None,
-        random_transforms: Optional[tuple[torch.nn.Module, ...]] = None,
     ) -> None:
         if img_dir:
             assert os.path.isdir(img_dir), f'Directory {img_dir} does not exist!'
@@ -153,25 +149,6 @@ class MRIDataset(Dataset):
         self.img_labels = pd.read_csv(annotations_file_path, sep=sep)
         self.label_map = data_label_mapping
         self.transform = transform
-        self.random_transforms = random_transforms if random_transforms else (
-            RandomCrop([256]), RandomRotation([-180, 180]), GaussianBlur(kernel_size=11, sigma=10)
-        )
-
-    def apply_random_transform(self, img: Tensor, return_name: bool = False) -> Tuple[Tensor, str]:
-        """
-        Apply a random image transform to the input image. Default transforms are saved in `self.transforms`.
-        Args:
-            img (Tensor): Image tensor to be transformed.
-            return_name (bool, optional): Whether to return the name of the applied transform. Meant for debugging
-                purposes.
-        Return:
-            Transformed image tensor.
-        """
-        transform = random.choice(self.random_transforms)
-        if return_name:
-            return transform(img), transform.__class__.__name__     # for debugging purposes
-        else:
-            return transform(img)
 
     def __getitem__(
         self, idx: int,
@@ -187,8 +164,6 @@ class MRIDataset(Dataset):
         # normalize to [0, 1]
         if self.transform:
             img = self.transform(img)
-        if apply_random_transform:
-            img = self.apply_random_transform(img)
 
         return img, label.unsqueeze(-1)
 
