@@ -359,8 +359,8 @@ class CustomModel(nn.Module):
             self,
             x_t: Tensor,
             t: Tensor,
-            labels: Optional[Tensor] = None,
-            guidance_scale: Optional[float | Tensor] = None
+            labels: Tensor,
+            guidance_scale: float = 1.
     ) -> Tensor:
         r"""
         Return Classifier-Free score. Used at *inference time only* for qualitative analysis.
@@ -373,13 +373,8 @@ class CustomModel(nn.Module):
         Shape:
             - Output: Tensor of shape (B, C, H, W)
         """
-        if labels is None:
-            guidance_scale = 0
-            null_labels = None
-        else:
-            guidance_scale = guidance_scale if guidance_scale else self.guidance_scale
-            null_labels = torch.full_like(labels, self.net.null_token, dtype=torch.int, device=self.device)  # (B, 1)
-        return (1 - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
+        null_labels = torch.full_like(labels, 4, dtype=torch.int, device=self.device)  # (B, 1)
+        return (1. - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
 
     def get_classifier_free_labels(self, labels: Tensor, rate: float = 0.2) -> Tensor:
         r"""
@@ -395,11 +390,10 @@ class CustomModel(nn.Module):
             labels (Tensor): Labels for each image. Dtype has to be ``torch.float``.
             rate (float): Probability of substitution of a conditional image label with a null token.
         """
-        rate = rate if rate else self.unconditional_rate
-        p_uncond = torch.rand_like(labels.to(torch.float), device=self.device)
-        labels = torch.where(p_uncond < rate, 4., labels)  # 4. as the null token
+        p_uncond = torch.rand([labels.shape[0], 1], device=self.device)
+        labels = torch.where(p_uncond < rate, 4, labels)  # 4. as the null token
 
-        return labels.to(torch.int) # labels.long()
+        return labels
 
     @abstractmethod
     def sample_img(self, *args, **kwargs) -> Tensor:
