@@ -13,9 +13,9 @@ class MlflowConfig:
     Tracking username, password and server uri have to be set manually below or in a .env file.
     """
     mlflow_experiment_name: str = 'msc_research_internship'
-    mlflow_server_uri: str = os.environ['MLFLOW_SERVER_URI']
-    mlflow_tracking_username: str = os.environ['MLFLOW_TRACKING_USERNAME']
-    mlflow_tracking_passwd: str = os.environ['MLFLOW_TRACKING_PASSWORD']
+    mlflow_server_uri: str = os.environ.get('MLFLOW_SERVER_URI', None)
+    mlflow_tracking_username: str = os.environ.get('MLFLOW_TRACKING_USERNAME', None)
+    mlflow_tracking_passwd: str = os.environ.get('MLFLOW_TRACKING_PASSWORD', None)
 
 
 class BaseUnetConfig:
