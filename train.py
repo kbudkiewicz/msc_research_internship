@@ -272,7 +272,7 @@ def train_diffusion():
 if __name__ == '__main__':
     use_unet = True
     vit_config = MyVit()
-    device = torch.device("mps")
+    device = torch.device("cpu")
 
     if not use_unet:
         train(
@@ -298,8 +298,8 @@ if __name__ == '__main__':
     else:
         train(
             UNet(
-                channels=[16, 32, 64, 128],
-                num_residual_layers=3,
+                channels=[16, 32, 64, 128, 256],
+                num_residual_layers=4,
                 t_embed_dim=64,
                 y_embed_dim=64
             ),

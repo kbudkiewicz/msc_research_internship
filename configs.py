@@ -46,13 +46,14 @@ class VitBase:
     dropout_rate: float = 0.0
 
 
-class MyVit:
+@dataclass
+class MyVit(VitBase):
     n_labels: int = 4
     patch_size: int = 16
-    depth_encoder: int = 6
-    embed_dim: int = 512
+    depth_encoder: int = 5
+    embed_dim: int = 256
     mlp_dim: int = 1024
-    n_heads: int = 16
+    n_heads: int = 8
     dropout_rate: float = 0.0
     num_groups: int = 32  # if GroupNorm is used
 

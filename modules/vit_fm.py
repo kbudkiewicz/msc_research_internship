@@ -88,7 +88,7 @@ class ViTFlowMatchingConditional(nn.Module):
         """
         B = x.shape[0]
         # Patchify image
-        x = self.patch_embed(x)  # [B, embed_dim, patch size, patch size]
+        x = self.patch_embed(x)  # [B, embed_dim, H/patch_size, W/patch_size]
         x = x.flatten(2).transpose(1, 2)  # [B, num_patches, embed_dim]
         # Patch position ids
         pos_ids = torch.arange(self.num_patches, device=x.device).unsqueeze(0)  # [1, num_patches]
