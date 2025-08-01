@@ -1,9 +1,7 @@
 import os
-import torch
 
 from dotenv import load_dotenv
 from dataclasses import dataclass
-from torch import Tensor, device
 load_dotenv()
 
 
@@ -22,8 +20,6 @@ class BaseUnetConfig:
     """
     Default parameters of the `UNet <http://arxiv.org/abs/1505.04597>`_.
     """
-    device: device = device('cuda' if torch.cuda.is_available() else 'cpu')
-    cache: Tensor | list = []
     lr: float = 1e-4
     embed_dim: int = 64
     conv_kwargs: dict = {'kernel_size': 3, 'stride': 1, 'padding': 1}

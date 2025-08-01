@@ -15,22 +15,15 @@ class MlpBlock(nn.Module):
         self,
         in_dim: int = 256,
         out_dim: int = 64,
-        n_layers: int = 3,
-        activation: nn.Module = nn.ReLU,
+        activation: nn.Module = nn.GELU,
         dropout_rate: float = 0.0,
         device: Optional[torch.device | str] = None,
     ):
         super().__init__()
-        block = nn.Sequential(
-            nn.Linear(out_dim, out_dim),
-            activation(inplace=True),
-            nn.Dropout(dropout_rate),
-        )
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, out_dim),
-            activation(inplace=True),
+            activation(),
             nn.Dropout(dropout_rate),
-            *nn.ModuleList([block for _ in range(n_layers)]),
             nn.Linear(out_dim, in_dim)
         )
         if device:
@@ -40,22 +33,47 @@ class MlpBlock(nn.Module):
         return self.mlp(x)
 
 
+class FourierEmbedding(nn.Module):
+    """
+    Taken from MIT - Flow matching course
+    Based on https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/karras_unet.py#L183
+    """
+    def __init__(self, dim: int):
+        super().__init__()
+        assert dim % 2 == 0
+        self.register_parameter('weights', nn.Parameter(torch.randn(1, dim//2)))
+
+    def forward(self, t: Tensor) -> Tensor:
+        """
+        Shapes:
+            - Input t: (B,)
+            - Output: (B, dim)
+        """
+        t = t.unsqueeze(-1)
+        freqs = t * self.weights * 2 * math.pi   # -> (B, dim//2)
+        sin_embd = torch.sin(freqs)
+        cos_embd = torch.cos(freqs)
+        return torch.cat([sin_embd, cos_embd], dim=-1) * math.sqrt(2)   # (B, dim)
+
+
 class SinusoidalEmbedding(nn.Module):
     """
     Adds a sinusoidal embedding to the input. The embedding is broadcasted for batched inputs too.
 
     Args:
-        dropout_p (float): Dropout probability.
         max_len(int, Optional): Maximum context window.
+        embed_dim (int): Embedding dimension.
+        dropout_p (float): Dropout probability.
 
     Shapes:
+        - Input (Tensor):  (batch_size,) max_len
         - Output (Tensor): (batch_size,) max_len, embed_dim
     """
     def __init__(
         self,
+        max_len: int = 512,
         embed_dim: int = 256,
         dropout_p: float = 0.0,
-        max_len: int = 512,
         device: Optional[torch.device | str] = None,
     ):
         super().__init__()
@@ -77,8 +95,12 @@ class SinusoidalEmbedding(nn.Module):
             self.to(device)
 
     def forward(self, x: Tensor) -> Tensor:
-        if x.shape[0] > 1:  # broadcast to (B, seq_len, D)
-            x += self.pe.repeat(x.shape[0], 1, 1)
+        """
+        Shapes:
+            - Input (Tensor): Timesteps of shape (B,)
+            - Output (Tensor): Embedding of shape (B,) max_len, embed_dim
+        """
+        x = self.pe.repeat(len(x), 1, 1)
         return self.dropout(x)
 
     @property
@@ -247,7 +269,7 @@ class TransformerEncoderBlock(nn.Module):
 
 class ConvBlock(nn.Module):
     """
-    A simple Convolutional block with normalization and activation function.
+    A simple Convolutional block consisting of an activation function, BatchNorm2d and Conv2d, in that order.
 
     Args:
         in_channels (int): Number of input channels.
@@ -264,9 +286,9 @@ class ConvBlock(nn.Module):
     ):
         super().__init__()
         self.net = nn.Sequential(
-            activation(inplace=True),  # for faster calculation
+            activation(),
+            nn.BatchNorm2d(in_channels),
             nn.Conv2d(in_channels, out_channels, **conv_kwargs),
-            nn.GroupNorm(4, out_channels),  # alternatively, nn.BatchNorm(in_channels)
         )
         if device:
             self.to(device)
@@ -283,10 +305,10 @@ class ResBlock(nn.Module, BaseUnetConfig):
     Base class for residual blocks.
 
     Args:
-        in_channels (int): Number of input channels.
-        out_channels (int): Number of output channels.
-        do_upscale (bool, Optional): Whether the residual block is an up-scaling or down-scaling block. Defaults to `True`.
-            Depending on the value additional Pooling or Up-sampling layers are initialized, respectively.
+        channels (int): Number of input and output channels.
+        depth (int): Number of repeated layer.
+        do_upscale (bool, Optional): Whether the residual block is an up-scaling or down-scaling block. Defaults to
+            `True`. Depending on the value additional Pooling or Up-sampling layers are initialized, respectively.
 
     Shapes:
         - Input: :math:`(B, C_in, H, W)`
@@ -295,51 +317,95 @@ class ResBlock(nn.Module, BaseUnetConfig):
     """
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        do_upscale: Optional[bool] = None,
-        device: Optional[torch.device | str] = None,
+        channels: int,
+        t_dim: int,
+        label_dim: int,
     ):
         super().__init__()
-        if do_upscale is not None:
-            self.do_upscale = do_upscale
-            self.do_downscale = not do_upscale
-        else:
-            self.do_upscale = self.do_downscale = False
-        self.conv_1 = ConvBlock(in_channels, out_channels, **self.conv_kwargs)
-        self.conv_2 = ConvBlock(out_channels, out_channels, **self.conv_kwargs)
-        # TODO: implement time_dmbd_dim
-        self.time_embd_dim = 32
+        self.in_block = ConvBlock(channels, channels, **self.conv_kwargs)
+        self.out_block = ConvBlock(channels, channels, **self.conv_kwargs)
         self.time_adapter = nn.Sequential(
-            nn.Linear(self.time_embd_dim, self.time_embd_dim),
+            nn.Linear(t_dim, t_dim),
             nn.SiLU(),
-            nn.Linear(self.time_embd_dim, out_channels),
+            nn.Linear(t_dim, channels),
         )
-
-        if self.do_upscale:
-            self.upsample = nn.Upsample(**self.upscale_kwargs)
-        if self.do_downscale:
-            self.pool = nn.MaxPool2d(**self.pool_kwargs)
         self.label_adapter = nn.Sequential(
-            nn.Linear(self.time_embd_dim, self.time_embd_dim),
+            nn.Linear(label_dim, label_dim),
             nn.SiLU(),
-            nn.Linear(self.time_embd_dim, out_channels),
+            nn.Linear(label_dim, channels),
         )
-        if device:
-            self.to(device)
 
-    def forward(self, x: Tensor, time_embd: Tensor = None, label_embd: Optional[Tensor] = None) -> Tensor:
-        # res = x.clone()
-        x = self.conv_1(x)
-        # x += self.time_adapter(time_embd)[..., None, None]
-        if label_embd:
-            x += self.label_adapter(label_embd)[..., None, None]
-        x = self.conv_2(x)
-        # x + res # TODO: res connection
+    def forward(self, x: Tensor, t_embd: Tensor, labels_embd: Tensor) -> Tensor:
+        """
+        Shapes::
+            - x: :math:`(B, C, H, W)`
+            - t: :math:`(B, D)`
+            - labels: :math:`(B, D)`
+        """
+        res = x.clone()
+        x = self.in_block(x)
 
-        if self.do_downscale:
-            x = self.pool(x)
-        if self.do_upscale:
+        # embeddings
+        t_embd = self.time_adapter(t_embd).unsqueeze(-1).unsqueeze(-1)              # -> (B, C, 1, 1)
+        labels_embd = self.label_adapter(labels_embd).unsqueeze(-1).unsqueeze(-1)   # -> (B, C, 1, 1)
+        x += t_embd
+        x += labels_embd
+
+        x = self.out_block(x)
+        x + res
+
+        return x
+
+
+class Rescaler(nn.Module):
+    """
+    Block working as a decoder and encoder.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        t_dim (int): Dimension of timestep embedding.
+        label_dim (int): Dimension of label embedding.
+        depth (int): Number of ResBlock repetitions.
+        upscale (bool): Whether to upscale the input. Defaults to ``True`` and the block is equivalent to a decoder
+            upsampling the input . If ``False``, the block is equivalent to an encoder downscaling the input.
+    """
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        t_dim: int,
+        label_dim: int,
+        depth: int,
+        upscale: bool = True,
+    ):
+        super().__init__()
+        self.upscale = upscale
+
+        self.blocks = nn.ModuleList([
+            ResBlock(out_channels if upscale else in_channels, t_dim, label_dim) for _ in range(depth)
+        ])
+        if upscale:
+            self.upsample = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode='bilinear'),
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            )
+        else:
+            self.downsample = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
+
+    def forward(self, x: Tensor, t_embd: Tensor, labels_embd: Tensor) -> Tensor:
+        """
+        Shapes:
+            - x: :math:`(B, C, H, W)`
+            - t: :math:`(B, D)`
+            - labels: :math:`(B, D)`
+        """
+        if self.upscale:
             x = self.upsample(x)
 
+        for block in self.blocks:
+            x = block(x, t_embd, labels_embd)
+
+        if not self.upscale:
+            x = self.downsample(x)
         return x

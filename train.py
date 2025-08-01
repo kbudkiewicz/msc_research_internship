@@ -17,7 +17,8 @@ from torch import Tensor
 from torch.nn.functional import mse_loss
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, ConcatDataset, random_split
-from torchvision.transforms.v2 import Compose, ConvertImageDtype, Normalize, RandomRotation, GaussianBlur
+from torchvision.transforms.v2 import Compose, RandomRotation, GaussianBlur, ToImage, ToDtype
+from torchvision.utils import save_image
 load_dotenv()
 
 
@@ -25,31 +26,29 @@ load_dotenv()
 def validate(
         model: FlowMatchingNet,
         epoch: int,
-        batch_size: int,
         val_loader: DataLoader,
-        mode: str,
-        # loss_fnc: Optional[Callable[[Tensor, Tensor], Tensor]] = None,
+        run_name: str,
     ):
     """
     Validate the model on the validation set.
     """
     model.eval()
+    mode = run_name.split('_')[0]
     val_tqdm = tqdm(val_loader, total=len(val_loader), desc='Validation')
     val_losses = torch.zeros(len(val_loader), dtype=torch.float32, device=model.device, requires_grad=False)
 
     for i, batch in enumerate(val_tqdm):
-        x1, labels = batch
-        x1, labels = x1.to(model.device), labels.to(model.device)  # x1 = (B, D)
+        x1, labels = batch  # x1: (B, C, H, W), labels: (B,)
+        x1, labels = x1.to(model.device), labels.to(model.device)
         x0 = torch.randn_like(x1, device=model.device)
 
         if mode == 'flow-matching':
-            # t: random [0,1] -> (B, 1, H, W) / as additional channel
-            t = torch.rand(batch_size, 1, 1, 1, device=model.device)  # (B, 1) -> embd -> +
+            t = torch.rand([x1.shape[0], 1, 1, 1], device=model.device)
             xt = (1 - t) * x0 + t * x1  # (B, D)
             delta = x1 - x0
-            loss = mse_loss(model(xt, t, labels), delta)
+            loss = mse_loss(model(xt, t.squeeze(), labels), delta)
         elif mode == 'diffusion':
-            loss = mse_loss(model(x1, labels=labels, noise=x0), x1)
+            loss = mse_loss(model(x1, labels=labels, noise=x0), x0)
         else:
             raise ValueError('Invalid validation mode.')
 
@@ -59,6 +58,7 @@ def validate(
     mean_val_loss = torch.mean(val_losses)
     # compare first 8 samples of the last batch
     if epoch % 10 == 0:
+        img_size = x1.shape[-1]
         for n_steps in {1, 10, 100}:
             print(f'Sampling {n_steps} steps...')
             img = model.sample_img(x1, n_steps=n_steps)
@@ -105,10 +105,10 @@ def train(
         mlflow_config (object, optional): Config class of Mlflow experiment.
         mode (str): Type of model to be trained. Either `flow-matching` or `diffusion`.
     """
-    run_name = mode + '-' + run_name + f'_{img_size}'
+    run_name = mode + '_' + run_name + f'_{img_size}'
     experiment_path = os.path.join(path, run_name)
-    if not os.path.isdir(experiment_path):
-        os.mkdir(experiment_path)
+    if not os.path.isdir(f'./data/assets/{run_name}'):
+        os.makedirs(f'./data/assets/{run_name}', exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if mode == 'flow-matching':
@@ -127,26 +127,23 @@ def train(
         early_stopper = EarlyStopper(experiment_path=experiment_path, patience=patience)
 
     # data import and augmentation
-    transform = Compose([
-        ConvertImageDtype(torch.float),
-        Normalize([0], [1], inplace=True),  # TODO: Tensor contains vals > 1
-    ])
+    basic_transform = Compose([ToImage(), ToDtype(torch.float, scale=True)])
     training_data, validation_data = random_split(
-        MRIDataset(f'./data/preprocessed_{img_size}/annotations.csv', transform=transform),
-        [0.8, 0.2],
+        MRIDataset(f'./data/preprocessed_{img_size}/annotations.csv', transform=basic_transform),
+        [0.9, 0.1],
         torch.manual_seed(42)   # for reproducible validation set
     )
     if augmented:
         gaussian_blurred = MRIDataset(
             f'./data/preprocessed_{img_size}/annotations.csv',
-            transform=Compose([transform, GaussianBlur(kernel_size=5, sigma=3.)])
+            transform=Compose([GaussianBlur(kernel_size=11, sigma=5.), basic_transform])
         )
         rotated = MRIDataset(
             f'./data/preprocessed_{img_size}/annotations.csv',
-            transform=Compose([transform, RandomRotation(90)])
+            transform=Compose([RandomRotation(15), basic_transform])
         )
         training_data = ConcatDataset([training_data, gaussian_blurred, rotated])
-    train_loader = DataLoader(training_data, batch_size=batch_size, shuffle=True, drop_last=True)
+    train_loader = DataLoader(training_data, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(validation_data, batch_size=batch_size, drop_last=True)
 
     # set up mlflow tracking
@@ -159,6 +156,7 @@ def train(
             'model_type': mode
         })
     mlflow.log_params({
+        'model_mode': mode,
         'model_class': model.net.__class__.__name__,
         'model_config': config,
         'img_size': img_size,
@@ -185,24 +183,24 @@ def train(
 
             # iterate over the dataset
             for i, batch in enumerate(train_tqdm):
-                x1, labels = batch
-                x1, labels = x1.to(device), labels.to(device)    # x1 = (B, D)
+                x1, labels = batch  # [B, 1, W, H], [B,]
+                x1, labels = x1.to(device), labels.to(device)
                 x0 = torch.randn_like(x1, device=device)
 
                 if mode == 'flow-matching':
-                    t = torch.rand(batch_size, 1, 1, 1, device=device)     # (B, 1) -> embd -> +
+                    t = torch.rand(x1.shape[0], 1, 1, 1, device=device)
                     xt = (1 - t) * x0 + t * x1  # (B, D)
                     delta = x1 - x0
-                    loss = model.backprop(model(xt, t, labels), delta, do_return=True)
+                    loss = model.backprop(model(xt, t.squeeze(), labels), delta, do_return=True)
                 elif mode == 'diffusion':
-                    loss = model.backprop(model(x1, labels=labels, noise=x0), x1, do_return=True)
+                    loss = model.backprop(model(x1, labels=labels, noise=x0), x0, do_return=True)
 
                 train_tqdm.set_postfix(training_loss=f'{loss.item():.8f}')
                 train_loss[i] = loss.item()
 
             # logging
             mean_train_loss = torch.mean(train_loss)
-            mean_val_loss = validate(model, epoch, batch_size, val_loader, mode)
+            mean_val_loss = validate(model, epoch, val_loader, run_name)
             mlflow.log_metrics(
                 {
                     'mean_train_loss': mean_train_loss.item(),
@@ -241,35 +239,30 @@ def train(
         exit('Caught KeyboardInterrupt. Saving checkpoint...')
 
 
-# TODO
-def train_diffusion():
-    pass
-
-
 if __name__ == '__main__':
     train(
-        VisionTransformer(
-            128,
-            depth_encoder=6,
-            n_heads=16,
-            mlp_dim=768,
-            patch_size=16,
-            embed_dim=768,
-        ),
+        Unet(64, 128, 256, 512, embed_dim=128),
         128,
-        run_name='vit',
-        epochs=50,
+        lr=1e-4,
+        run_name='unet',
+        epochs=100,
+        patience=10,
         augmented=True,
-        patience=8,
-        config=VitBase(),
-        mlflow_config=MlflowConfig
+        mlflow_config=MlflowConfig,
     )
-    # train_flow(
-    #     Unet(128, 64, 32),
+    # train(
+    #     VisionTransformer(
+    #         128,
+    #         in_channels=1,
+    #         depth_encoder=5,
+    #         n_heads=16,
+    #         patch_size=16,
+    #         embed_dim=512,
+    #     ),
     #     128,
-    #     run_name='unet',
-    #     epochs=200,
-    #     patience=10,
-    #     augmented=False,
-    #     mlflow_config=MlflowConfig(),
+    #     run_name='vit',
+    #     epochs=60,
+    #     augmented=True,
+    #     patience=6,
+    #     mlflow_config=MlflowConfig
     # )

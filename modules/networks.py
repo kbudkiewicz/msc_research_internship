@@ -2,15 +2,14 @@ import os
 import torch
 import torch.nn as nn
 
+from math import sqrt
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional, Iterable, Union
-from configs import BaseUnetConfig
-from modules.modules import SinusoidalEmbedding, Patchify, TransformerEncoderBlock, ResBlock
+from modules.modules import FourierEmbedding, TransformerEncoderBlock, ResBlock, ConvBlock, Rescaler
 
 from torch import Tensor
 from torch.nn.functional import mse_loss
-from torchvision.transforms import CenterCrop
 
 
 class Unet(nn.Module):
@@ -23,8 +22,7 @@ class Unet(nn.Module):
     Args:
         dims (iter): Hidden layer dimensions, e.g. (64, 128, 256, 512). Does not include the input, output dimensions,
             but does include the latent dimension
-        in_dim (int): Number of input channels of the model.
-        out_dim (int): Number of output channels of the model.
+        embed_dim (int): Embedding dimension of time-steps and labels.
         n_labels (int): Number of labels of the dataset. Default is 4.
         config (object, Optional): Configuration class containing new set of hyper parameters.
         device (torch.device, Optional): Device on which the model is trained on.
@@ -36,8 +34,10 @@ class Unet(nn.Module):
     def __init__(
         self,
         *dims: int,
+        embed_dim: int,
         in_dim: int = 1,
         out_dim: int = 1,
+        residual_depth: int = 3,
         n_labels: int = 4,  # num_classes \equiv glioma, notumor, ... = 4
         config: object = BaseUnetConfig,
         device: Optional[torch.device | str] = None,
@@ -50,119 +50,64 @@ class Unet(nn.Module):
         assert len(dims) > 1, 'dims must contain at least 2 integers'
 
         self.cache = {}
-        self.dims = dims
         self.in_dim = in_dim
         self.out_dim = out_dim
-        self.embed_dim = dims[-1]
-        dims_r = dims[::-1]
+        self.dims = dims
+        self.embed_dim = embed_dim
+        self.depth = residual_depth
         self.null_token = n_labels
 
         # additional label ('null token') for unconditional model training
-        self.label_embd = nn.Embedding(n_labels + 1, self.embed_dim)     # (B) -> (B, D)
+        self.embed_labels = nn.Embedding(n_labels + 1, self.embed_dim)     # (B) -> (B, D)
+        self.embed_t = FourierEmbedding(self.embed_dim)
 
-        # time_emb != timestep_emb
-        # TODO: conditional time embedding for Flow(nn.Module)
-        # https://github.com/openai/guided-diffusion/blob/main/guided_diffusion/unet.py#L648
-        # TODO: tensor (B,C,H,W) full of 't': just add to channels
-        self.timestep_embd = nn.Sequential(
-            # is basically a sinusoidal_embd with an activation function and mapping to higher latent dim
-            # SinusoidalEmbedding(1, dim),
-            # TODO: # Nxdim     timesteps: vec of N indices, 1 per batch el. may be fractional
-            nn.Linear(self.in_dim, self.embed_dim),
-            nn.SiLU(),
-            nn.Linear(self.embed_dim, self.embed_dim)
-        )
+        self.in_layer = ConvBlock(in_dim, dims[0], **{'kernel_size': 3, 'padding': 1})   # c = 1 -> dims[0]
+        self.out_layer = nn.Conv2d(dims[0], out_dim, kernel_size=3, padding=1)
 
-        self.in_layer = ResBlock(in_dim, dims[0])
-        self.out_layer = nn.Conv2d(dims[0], out_dim, kernel_size=1, stride=1)
-        self.encoder = nn.ModuleList([])
-        self.decoder = nn.ModuleList([])
-        self.midcoder = nn.Sequential(
-            ResBlock(dims[-1], dims[-1]),
-            ResBlock(dims[-1], dims[-1]),
-        )
-        for i in range(len(dims) - 1):
-            self.encoder.append(ResBlock(dims[i], dims[i + 1], do_upscale=False))
-            self.decoder.append(ResBlock(dims_r[i], dims_r[i + 1], do_upscale=True))
+        self.encoders = nn.ModuleList([])
+        self.decoders = nn.ModuleList([])
+        for dim_in, dim_out in zip(dims[:-1], dims[1:]):
+            self.encoders.append(Rescaler(dim_in, dim_out, self.embed_dim, self.embed_dim, depth=self.depth, upscale=False))
+            self.decoders.append(Rescaler(dim_out, dim_in, self.embed_dim, self.embed_dim, depth=self.depth, upscale=True))
+        self.midcoder = nn.ModuleList([
+            ResBlock(dims[-1], self.embed_dim, self.embed_dim) for _ in range(self.depth)
+        ])
 
-        self.to(device)
-        del dims_r
+        if device:
+            self.to(device)
 
-    @staticmethod
-    def crop(x: Tensor, desired: Tensor) -> Tensor:
-        """
-        Center crop the input to fit for the concatenation.
-
-        Assumes that the height and width of `x` is bigger than that of `desired`.
-
+    def forward(self, x: Tensor, t: Tensor, labels: Tensor) -> Tensor:
+        r"""
         Args:
-            x (Tensor): Input image from the adjacent DownscaleBlock cache.
-            desired (Tensor): Tensor with the desired dimensions.
-
-        Returns:
-            Tensor: Cropped input image.
-
-        Shape:
-            - x: :math:`(..., H_1, W_1)`
-            - desired: :math:`(..., H_2, W_2)`
-        """
-        equal_dims = x.dim() == desired.dim()
-        crop = CenterCrop(desired.shape[:2])
-
-        if equal_dims:
-            h1, w1 = x.shape[-2:]
-            h2, w2 = desired.shape[-2:]
-            dw = int((w1 - w2) / 2)
-            dh = int((h1 - h2) / 2)
-
-            return x[..., dh:h1-dh, dw:w1-dw]
-        else:
-            return crop(x)
-
-    def forward(
-        self,
-        x: Tensor,
-        t: Tensor,
-        labels: Optional[Tensor] = None
-    ) -> Tensor:
-        """
-        Args:
-            x (Tensor): Input image with shape.
+            x (Tensor): Batch of images.
             t (Tensor): Time-steps.
-            labels (Tensor, Optional): Labels for each image. Can be passed only when the model is conditional.
+            labels (Tensor): Image class labels. Must contain ints, i.e. be of dtype torch.long .
 
         Shapes:
-            - x: :math:`(B, C, H, W)`
-            - t: :math:`(B, 1)\subset[0,1]`
-            - labels: :math:`(B, 1)`
+            - x: (B, C, H, W)
+            - t: (B,) \subset [0,1]
+            - labels: (B,)
         """
+        # Embeddings
+        t_embd = self.embed_t(t)  # (B, D)
+        label_embd = self.embed_labels(labels)    # (B, D)
+
         x = self.in_layer(x)
 
         # 1. Downscale: downscale blocks and save intermediate skip connection tensors to cache
-        for i, downscale_block in enumerate(self.encoder):
-            x = downscale_block(x)
-            self.cache[i] = x.clone().detach()
+        for i, encoder in enumerate(self.encoders):
+            x = encoder(x, t_embd, label_embd)
+            self.cache[i] = x.clone()
 
         # 2. Midcoder
-        if labels is not None:
-            embd = self.label_embd(labels).squeeze()
-            while embd.ndim < x.ndim:
-                embd.unsqueeze_(-1)
-            x += embd   # += (B, D, 1, 1)
-
-        # temp = self.timestep_embd(t).contiguous().reshape(x.shape) # TODO: try doing that instead the bottom
-        timestep_embd = torch.cat(
-            [torch.full([1, *x.shape[1:]], val.item(), device=self.device) for val in t]
-        )
-        x += timestep_embd
-        x = self.midcoder(x)
+        for block in self.midcoder:
+            x = block(x, t_embd, label_embd)
 
         # 3. Upscale: upscale blocks and add appropriate tensors from cache
-        for upscale_block, res in zip(self.decoder, list(self.cache.values())[::-1]):
-            res = self.crop(res, x)
-            x = upscale_block(x, res)
+        for decoder, res in zip(reversed(self.decoders), reversed(self.cache.values())):
+            x += res
+            x = decoder(x, t_embd, label_embd)
 
-        self.cache = {}
         x = self.out_layer(x)
 
         return x
@@ -190,10 +135,10 @@ class VisionTransformer(nn.Module):
     def __init__(
         self,
         img_size: int,
+        in_channels: int,
         depth_encoder: int = 5,
         patch_size: int = 16,
         embed_dim: int = 256,
-        mlp_dim: int = 256,
         n_heads: int = 8,
         n_labels: int = 4,
         dropout_rate: float = 0.0,
@@ -215,28 +160,29 @@ class VisionTransformer(nn.Module):
             self.null_token = n_labels
         self.n_labels = n_labels
         self.n_patches = int(img_size ** 2 / self.patch_size ** 2)
-        self.patch_dim = self.patch_size ** 2     # channel size C is omitted as the input is grayscaled, i.e., C=1
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = device
 
-        self.pos_embd = SinusoidalEmbedding(
-            self.embed_dim, max_len=self.n_patches, device=self.device
-        )
-        # additional token for CFG unconditional model training
-        self.label_embd = nn.Embedding(self.n_labels + 1, self.embed_dim, device=self.device)
-        self.patch_embd = nn.Sequential(
-            Patchify(self.patch_size),  # we flatten the patches and map to ...
-            nn.Linear(self.patch_dim, self.embed_dim),
-            nn.LayerNorm(self.embed_dim),
-            nn.ReLU(),
+        # Embeddings
+        self.pos_embd = nn.Embedding(self.n_patches, self.embed_dim)
+        # additional token for unconditional CFG
+        self.label_embd = nn.Sequential(
+            nn.Embedding(self.n_labels + 2, self.embed_dim),    # B -> B, D
             nn.Linear(self.embed_dim, self.embed_dim),
+            nn.GELU()
         )
+        self.timestep_embd = nn.Sequential(
+            FourierEmbedding(self.embed_dim),
+            nn.Linear(self.embed_dim, self.embed_dim),
+            nn.GELU()
+        )
+        self.patch_embd = nn.Conv2d(self.in_channels, self.embed_dim, self.patch_size, self.patch_size)
         self.encoder = nn.ModuleList(
             TransformerEncoderBlock(
                 embed_dim=self.embed_dim,
-                mlp_dim=self.mlp_dim,
+                mlp_dim=int(4 * self.embed_dim),
                 n_heads=self.n_heads,
                 dropout_rate=self.dropout_rate,
                 device=self.device
@@ -244,87 +190,55 @@ class VisionTransformer(nn.Module):
             for _ in range(depth_encoder)
         )
         self.out_proj = nn.Sequential(
-            nn.Linear(self.embed_dim, self.embed_dim),
-            nn.ReLU(),
             nn.LayerNorm(self.embed_dim),
-            nn.Linear(self.embed_dim, self.patch_dim),
+            nn.Linear(self.embed_dim, self.in_channels * self.patch_size**2),
         )
 
         self.to(self.device)
 
-    def forward(
-        self,
-        img: Tensor,
-        t: Tensor,
-        labels: Optional[Tensor] = None,
-        mask: Optional[Tensor] = None
-    ) -> Tensor:
+    def forward(self, img: Tensor, t: Tensor, labels: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         """Pass a batch of images and mask to Vision Transformer.
 
         Args:
-            img (Tensor): Input image to be passed through
-            t (Tensor): Time-steps.
-            labels (Tensor, optional): Labels for each image. Used when the model is conditional.
-            mask (Tensor, optional): Padding mask.
+            img (Tensor): Input image to be passed through. (B, C, H, W)
+            t (Tensor): Time-steps. (B,)
+            labels (Tensor, optional): Corresponding image labels. (B,)
+            mask (Tensor, optional): Padding mask. (B, 1, D, D)
         """
-        original_shape = img.shape
-        # embeddings
-        img += self.add_timestep_embd(img, t)
-        img = self.patch_embd(img)
-        img = self.pos_embd(img)    # TODO
+        assert t.shape == labels.shape, 'labels and t must have equal shapes.'
+        # Embeddings
+        img = self.patch_embd(img)  # B, embed_dim, H/patch_size, W/patch_size
+        img = img.flatten(2).transpose(1, 2)  # B, n_patches, embed_dim
 
-        if labels is not None:
-            img += self.label_embd(labels)
+        patch_ids = torch.arange(self.n_patches, device=self.device).unsqueeze(0)
+        # Below all have shape: B, 1, embed_dim
+        pos_embd = self.pos_embd(patch_ids).expand(img.shape[0], -1, -1)
+        t_embd = self.timestep_embd(t).unsqueeze(1)
+        label_embd = self.label_embd(labels).unsqueeze(1)
+
+        img += pos_embd
+        img += t_embd
+        img += label_embd
+
         # forward pass
         for block in self.encoder:
             img = block(img, mask=mask)
-        img = self.out_proj(img)    # project back to image shape
+        img = self.out_proj(img)    # B, n_patches, c*patch_size**2
+        img = self.from_patches(img)
 
-        return img.view(original_shape)
+        return img
 
-    def add_timestep_embd(self, img: Tensor, t: Tensor) -> Tensor:
+    def from_patches(self, img: Tensor) -> Tensor:
         """
-        Adds a time-step-embedding to the input image.
-
-        ``timestep_embedding`` is a ``Tensor`` with the same shape as ``img`` filled with a random number sampled
-        from [0,1].
-        """
-        if img.ndim == 4:
-            timestep_embd = torch.cat(
-                [torch.full([1, *img.shape[1:]], fill_value=val.item(), device=self.device) for val in t]
-            )
-        elif img.ndim == 3 or t.ndim == 1:
-            timestep_embd = torch.full(img.shape, fill_value=t.item(), device=self.device)
-        else:
-            raise ValueError(f'Timestep embedding error. Unsupported img shape {img.shape}.')
-
-        # assert timestep_embd.shape == img.shape, f'Shape of timestep_embd ({timestep_embd.shape}) does not match img.'
-        return img + timestep_embd
-
-    def patchify(self, img: Tensor, patch_size: Optional[int] = None) -> Tensor:
-        """
-        Patchify an input image for the Vision Transformer to process.
-
-        The output shape is inferred automatically. If the input is a 3D or a non-batched ``Tensor`` the output
-        will be recast to :math:`(1, N, CP^2)`, where :math:`N=HxW/P^2` is the number of patches.
-
-        Args:
-            img (Tensor): Input image to be made into patches.
-            patch_size (int): Patch size (P).
+        View patches as an image.
 
         Shapes:
-            - img (Tensor): :math:`B, (C, H, W)`
-            - patches (Tensor): :math:`B, (N, CP^2)`
-
-        Return:
-            Patches.
+            - img (Tensor): (B,) N, CP^2, where :math:`N=HxW/P^2` is ``n_patches``.
+            - output (Tensor): (B,) C, H, W
         """
-        assert img.ndim in {3, 4}, f'Input image must be 3D or 4D but is {img.ndim}'
-        patch_size = patch_size if patch_size else self.patch_size
-
-        c, h, w = img.shape[-3:]
-        n = int(h*w/patch_size**2)
-        img = img.view(-1, n, c*patch_size**2)
+        b, *_ = img.shape
+        h = w = int(sqrt(self.n_patches * self.patch_size**2))
+        img = img.contiguous().view(b, self.in_channels, h, w)
 
         return img
 
@@ -333,13 +247,7 @@ class CustomModel(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward_cfg(
-            self,
-            x_t: Tensor,
-            t: Tensor,
-            labels: Tensor,
-            guidance_scale: float = 1.
-    ) -> Tensor:
+    def forward_cfg(self, x_t: Tensor, t: Tensor, labels: Tensor, guidance_scale: float = 1.) -> Tensor:
         r"""
         Return Classifier-Free score. Used at *inference time only* for qualitative analysis.
 
@@ -348,10 +256,13 @@ class CustomModel(nn.Module):
 
         where :math:`\emptyset` is the null token for unconditional training.
 
-        Shape:
+        Shapes:
+            - x_t: (B, C, H, W)
+            - t: (B, )
+            - labels: (B, )
             - Output: Tensor of shape (B, C, H, W)
         """
-        null_labels = torch.full_like(labels, 4, dtype=torch.int, device=self.device)  # (B, 1)
+        null_labels = torch.full_like(labels, 4, dtype=torch.long, device=self.device)  # (B,)
         return (1. - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
 
     def get_classifier_free_labels(self, labels: Tensor, rate: float = 0.2) -> Tensor:
@@ -368,7 +279,7 @@ class CustomModel(nn.Module):
             labels (Tensor): Labels for each image. Dtype has to be ``torch.float``.
             rate (float): Probability of substitution of a conditional image label with a null token.
         """
-        p_uncond = torch.rand([labels.shape[0], 1], device=self.device)
+        p_uncond = torch.rand(labels.shape[0], device=self.device)
         labels = torch.where(p_uncond < rate, 4, labels)  # 4. as the null token
 
         return labels
@@ -378,11 +289,11 @@ class CustomModel(nn.Module):
         raise NotImplementedError
 
     def backprop(
-            self,
-            y1: Tensor,
-            y2: Tensor,
-            loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
-            do_return: bool = False
+        self,
+        y1: Tensor,
+        y2: Tensor,
+        loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
+        do_return: bool = False
     ) -> Tensor | None:
         """
         Perform a backpropagation step. If no ``loss_fnc`` is not provided, the loss defaults to MSE.
@@ -445,8 +356,8 @@ class FlowMatchingNet(CustomModel):
 
     Args:
         net (nn.Module): Neural Network used to approximate the velocity field.
-        guidance_scale (float): Guidance scale. Determines the strength of model conditionality. The higher the value, the higher
-            the model conditioning.
+        guidance_scale (float): Guidance scale. Determines the strength of model conditionality. The higher the value,
+            the higher the model conditioning.
         classifier_free_rate (float): Probability of substituting conditional tokens for unconditional ones.
         lr (float): Learning rate.
         config (object, optional): Configuration object.
@@ -460,7 +371,7 @@ class FlowMatchingNet(CustomModel):
         lr: float = 5e-4,
         weight_decay: float = 0.0,
         config: Optional[object] = None,
-        device: Optional[torch.device | str] = None,
+        device: Optional[Union[torch.device, str]] = None,
     ):
         super().__init__()
         self.device = device
@@ -474,12 +385,17 @@ class FlowMatchingNet(CustomModel):
         if device:
             self.to(device)
 
-    def forward(self, x_t: Tensor, t: Tensor, labels: Optional[Tensor] = None) -> Tensor:
-        if labels is not None:
-            labels = self.get_classifier_free_labels(labels)
+    def forward(self, x_t: Tensor, t: Tensor, labels: Tensor) -> Tensor:
+        """
+        Args:
+            x_t (Tensor): Batch of images (B, C, H, W)
+            t (Tensor): Time-steps (B,)
+            labels (Tensor): Class labels (B,)
+        """
+        labels = self.get_classifier_free_labels(labels)
         return self.net(x_t, t, labels)
 
-    def step(self, x_t: Tensor, t_start: Tensor, t_end: Tensor, labels: Tensor, guidance_scale: Optional[float] = None) -> Tensor:
+    def step(self, x_t: Tensor, t_start: Tensor, t_end: Tensor, label: Tensor, guidance_scale: float) -> Tensor:
         r"""
         Perform an ODE solving step to reconstruct the image step-by-step. Uses the midpoint solver given by:
 
@@ -488,51 +404,27 @@ class FlowMatchingNet(CustomModel):
 
         See `Flow Matching Guide and Code <https://arxiv.org/abs/2412.06264>`__ for more information.
         """
-        if x_t.ndim == 3:
-            t_start = t_start.view(1, 1).expand(x_t.shape[0], -1)
-        elif x_t.ndim == 4:
-            t_start = t_start.view(1, 1).expand(x_t.shape[1], -1)
-        delta_t = t_end - t_start
+        delta = t_end - t_start
+        return x_t + delta * self.forward_cfg(
+            x_t + self.forward_cfg(x_t, t_start, label, guidance_scale=guidance_scale) * (delta / 2),
+            t_start + (delta / 2),
+            label,
+            guidance_scale=guidance_scale
+        )
 
-        if guidance_scale:
-            return x_t + delta_t * self.forward_cfg(
-                x_t + self.forward_cfg(x_t, t_start, labels, guidance_scale=guidance_scale) * delta_t / 2, t_start + delta_t / 2, labels,
-                guidance_scale=guidance_scale
-            )
-        else:
-            return x_t + delta_t * self(x_t + self(x_t, t_start)*delta_t/2, t_start + delta_t/2)
+    def sample_img(self, img_size: int, label: Tensor, n_steps: int = 50, guidance_scale: float = 1.):
+        if not isinstance(img_size, int):
+            raise TypeError(f'img_size must be int but is {type(img_size)}')
+        if not isinstance(label, Tensor):
+            raise TypeError(f'label must be Tensor but is {type(label)}')
 
-    def sample_img(
-        self,
-        input_: Tensor | int,
-        labels: Tensor,
-        n_steps: int = 50,
-        return_reconstruction: bool = False,
-        guidance_scale: Optional[float] = None,
-    ):
-        timesteps = torch.linspace(0., 1., n_steps + 1, device=self.device)
-        if isinstance(input_, Tensor):
-            x0 = torch.randn_like(input_, device=self.device)
-            # reconstruction = torch.randn([n_steps + 1, *input.shape[1:]], device=self.device, requires_grad=False)
-        elif isinstance(input_, int):
-            x0 = torch.randn([1, input_, input_], device=self.device)
-            # reconstruction = torch.randn([n_steps + 1, 1, input, input], device=self.device, requires_grad=False)
-        else:
-            raise TypeError(f'Unexpected type: {type(input_)}')
+        timesteps = torch.linspace(0., 1., n_steps + 1, device=self.device).unsqueeze(-1)
+        img = torch.randn([1, 1, img_size, img_size], device=self.device)
 
         for i in range(n_steps):
-            input_ = self.step(x0, timesteps[i], timesteps[i + 1], labels, guidance_scale=guidance_scale)
+            img = self.step(img, timesteps[i], timesteps[i + 1], label, guidance_scale=guidance_scale)
 
-        if return_reconstruction:
-            reconstruction = torch.randn([n_steps + 1, *x0.shape], device=self.device, requires_grad=False)
-            with torch.no_grad():
-                for i in range(n_steps):
-                    reconstruction[i + 1] = self.step(x0, timesteps[i], timesteps[i + 1], labels, guidance_scale=guidance_scale)
-
-        if return_reconstruction:
-            return input_, reconstruction
-        else:
-            return input_
+        return img
 
     def sample_reconstruction(
         self,
@@ -600,7 +492,7 @@ class DiffusionNet(CustomModel):
 
         self.n_timesteps = timesteps
         if isinstance(beta_1, (float, int)) and not isinstance(beta_t, (float, int)):
-            betas = torch.full((timesteps,), beta_1, dtype=torch.float, device=device)
+            betas = torch.full([timesteps,], beta_1, dtype=torch.float, device=device)
         else:
             betas = torch.linspace(beta_1, beta_t, self.n_timesteps, dtype=torch.float, device=device)
         self.betas = betas
@@ -609,7 +501,7 @@ class DiffusionNet(CustomModel):
         self.sqrt_alphas_bar = torch.sqrt(self.alphas_bar)
         self.sqrt_rev_alphas_bar = torch.sqrt(1 - self.alphas_bar)
 
-    def register_schedule(self, timesteps, betas: Union[Tensor, float, int]):
+    def register_schedule(self, timesteps: int, betas: Union[float, int]):
         """
         Register a schedule of alphas and betas for diffusion networks.
 
@@ -626,14 +518,21 @@ class DiffusionNet(CustomModel):
         self.sqrt_alphas_bar = torch.sqrt(self.alphas_bar)
         self.sqrt_rev_alphas_bar = torch.sqrt(1 - self.alphas_bar)
 
-    def forward(
-        self,
-        img: Tensor,
-        t: Union[Tensor, int] = None,
-        labels: Optional[Tensor] = None,
-        noise: Optional[Tensor] = None
-    ) -> Tensor:
-        if not isinstance(t, (Tensor, int)):
+    def forward(self, img: Tensor, t: int, labels: Tensor, noise: Optional[Tensor] = None) -> Tensor:
+        """
+        Args:
+            img (Tensor): Input images.
+            t (int): Time point from which the forward trajectory is sampled.
+            labels (Tensor): Image class labels.
+            noise (Tensor, optional): Specific noise from which the image is to be sampled. Defaults to None.
+
+        Shapes:
+            - img: (B, C, H, W)
+            - t: (B,)
+            - labels: (B,)
+            - noise: (B, C, H, W)
+        """
+        if not isinstance(t, int):
             t = torch.randint(0, self.n_timesteps, [img.shape[0],], dtype=torch.long, device=self.device)
         x_t = self.sample_q(img, t, noise=noise)     # sample noise from forward trajectory at random t
         if labels is not None:
@@ -653,7 +552,7 @@ class DiffusionNet(CustomModel):
             q(x_t,x_0) = N(x_t; \sqrt{\bar\alpha_t}x_0, (1-\bar\alpha_t)I)
 
         Args:
-            x_0 (Tensor): Original image / sample from target distribution. Shape :math:`(B,) C, H, W)`
+            x_0 (Tensor): Original image / sample from target distribution. Shape (B,) C, H, W)
             t (Tensor): Arbitrary time-step of the forward diffusion process.
             noise (Tensor, optional): Noise used to generate :math:`x_t`. Shape equal that of :math:`x_0`. Default: None
 
@@ -671,10 +570,10 @@ class DiffusionNet(CustomModel):
     @torch.no_grad()
     def sample_img(
         self,
-        size: int,
-        label: Union[Tensor, int],
-        guidance_scale: float = 0.,
-        steps: Optional[int] = None,
+        img_size: int,
+        label: Tensor,
+        n_steps: int = 10.,
+        guidance_scale: float = 1.,
         x_t: Optional[Tensor] = None,
     ) -> Tensor:
         r"""
@@ -690,31 +589,29 @@ class DiffusionNet(CustomModel):
         where :math:`\sigma_t=\sqrt{\beta_t}` or :math:`\sigma_t=\tilde{\beta_t}`.
 
         Args:
-            size (int): Dimensions of the reconstructed image. If ``x_t`` is provided, then ``size`` is overridden.
-            label (Tensor, int): Image label / class. Shape :math:`(B,)`
+            img_size (int): Dimensions of the reconstructed image. If ``x_t`` is provided, then ``size`` is overridden.
+            label (Tensor, int): Image label / class. Shape (B,)
+            n_steps (int): Number of reconstruction steps.
             guidance_scale (float): Guidance scale :math:`w` for Classifier Free Guidance. Default: 0.
-            x_t (Tensor, optional): Noise from which the image is reconstructed. Shape :math:`(B,) C, H, W`
-            steps (int, optional): Number of reconstruction steps.
+            x_t (Tensor, optional): Noise from which the image is reconstructed. Shape (B, C, H, W)
 
         .. note::
             This function implements Algorithm 2. from `DDPM <https://arxiv.org/abs/2006.11239>`__.
         """
         if isinstance(label, int):
-            label = torch.Tensor([label], device=self.device).long()
-        if not isinstance(steps, int):
-            steps = self.n_timesteps
+            label = torch.tensor([label], dtype=torch.long, device=self.device)
         if not isinstance(x_t, Tensor):
-            x_t = torch.rand([1, size, size], device=self.device)
+            x_t = torch.rand([1, 1, img_size, img_size], device=self.device)
 
-        for t in reversed(range(steps)):
-            t = torch.Tensor([t], device=self.device).long()
+        for t in reversed(range(n_steps)):
+            t = torch.tensor([t], dtype=torch.long, device=self.device)
             z = torch.randn_like(x_t, device=self.device) if t > 1 else torch.zeros_like(x_t, device=self.device)
             a = 1 / torch.sqrt(self.extract(self.alphas, t, x_t))
             coeff = (1 - self.extract(self.alphas, t, x_t)) / torch.sqrt(self.extract(self.sqrt_rev_alphas_bar, t, x_t))
             sigma_t = torch.sqrt(self.extract(self.betas, t, x_t))
-            x_prev = a * x_t - coeff * self.forward_cfg(x_t, t, label, guidance_scale) + sigma_t * z
+            x_t = a * x_t - coeff * self.forward_cfg(x_t, t, label, guidance_scale) + sigma_t * z
 
-        return x_prev.permute(1, 2, 0).detach().cpu()
+        return x_t.permute(2, 3, 1).detach().cpu()
 
     @staticmethod
     def extract(tensor: Tensor, t: Tensor, desired_shape: Tensor.shape) -> Tensor:
