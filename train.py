@@ -48,7 +48,8 @@ def validate(
             delta = x1 - x0
             loss = mse_loss(model(xt, t.squeeze(), labels), delta)
         elif mode == 'diffusion':
-            loss = mse_loss(model(x1, labels=labels, noise=x0), x0)
+            t = torch.randint(0, 1000, [x1.shape[0]], dtype=torch.long, device=model.device)
+            loss = mse_loss(model(x1, t, labels=labels, noise=x0), x0)
         else:
             raise ValueError('Invalid validation mode.')
 
@@ -197,7 +198,8 @@ def train(
                     delta = x1 - x0
                     loss = model.backprop(model(xt, t.squeeze(), labels), delta, do_return=True)
                 elif mode == 'diffusion':
-                    loss = model.backprop(model(x1, labels=labels, noise=x0), x0, do_return=True)
+                    t = torch.randint(0, 1000, [x1.shape[0]], dtype=torch.long, device=device)    # (B,)
+                    loss = model.backprop(model(x1, t, labels=labels, noise=x0), x0, do_return=True)
 
                 train_tqdm.set_postfix(training_loss=f'{loss.item():.8f}')
                 train_loss[i] = loss.item()
