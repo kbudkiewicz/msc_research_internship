@@ -17,7 +17,7 @@ from torch import Tensor
 from torch.nn.functional import mse_loss
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, ConcatDataset, random_split
-from torchvision.transforms.v2 import Compose, RandomRotation, GaussianBlur, ToImage, ToDtype
+from torchvision.transforms.v2 import Compose, RandomRotation, GaussianBlur, ToImage, ToDtype, Normalize
 from torchvision.utils import save_image
 load_dotenv()
 
@@ -127,7 +127,11 @@ def train(
         early_stopper = EarlyStopper(experiment_path=experiment_path, patience=patience)
 
     # data import and augmentation
-    basic_transform = Compose([ToImage(), ToDtype(torch.float, scale=True)])
+    basic_transform = Compose([
+        ToImage(),
+        ToDtype(torch.float, scale=True),
+        Normalize([0.5], [0.5]) if mode == 'diffusion' else Normalize([0.], [1.])
+    ])
     training_data, validation_data = random_split(
         MRIDataset(f'./data/preprocessed_{img_size}/annotations.csv', transform=basic_transform),
         [0.9, 0.1],
