@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.nn as nn
 
@@ -7,9 +6,7 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional, Iterable, Union
 from modules.modules import FourierEmbedding, TransformerEncoderBlock, ResBlock, ConvBlock, Rescaler
-
 from torch import Tensor
-from torch.nn.functional import mse_loss
 
 
 class Unet(nn.Module):
@@ -534,9 +531,10 @@ class DiffusionNet(CustomModel):
         """
         if not isinstance(t, int):
             t = torch.randint(0, self.n_timesteps, [img.shape[0],], dtype=torch.long, device=self.device)
+        img = self.rescale(img)
         x_t = self.sample_q(img, t, noise=noise)     # sample noise from forward trajectory at random t
-        if labels is not None:
-            labels = self.get_classifier_free_labels(labels)
+        labels = self.get_classifier_free_labels(labels)
+        x_t = self.rescale(x_t)
 
         return self.net(x_t, t, labels)
 
@@ -601,22 +599,30 @@ class DiffusionNet(CustomModel):
         if isinstance(label, int):
             label = torch.tensor([label], dtype=torch.long, device=self.device)
         if not isinstance(x_t, Tensor):
-            x_t = torch.rand([1, 1, img_size, img_size], device=self.device)
+            x_t = torch.randn([1, 1, img_size, img_size], device=self.device)
 
         for t in reversed(range(n_steps)):
             t = torch.tensor([t], dtype=torch.long, device=self.device)
-            z = torch.randn_like(x_t, device=self.device) if t > 1 else torch.zeros_like(x_t, device=self.device)
+            z = torch.randn_like(x_t, device=self.device) if t > 1 else 0.
             a = 1 / torch.sqrt(self.extract(self.alphas, t, x_t))
             coeff = (1 - self.extract(self.alphas, t, x_t)) / torch.sqrt(self.extract(self.sqrt_rev_alphas_bar, t, x_t))
             sigma_t = torch.sqrt(self.extract(self.betas, t, x_t))
-            x_t = a * x_t - coeff * self.forward_cfg(x_t, t, label, guidance_scale) + sigma_t * z
+            x_t = a * (x_t - coeff * self.forward_cfg(x_t, t, label, guidance_scale)) + sigma_t * z
+            x_t = self.rescale(x_t)
 
-        return x_t.permute(2, 3, 1).detach().cpu()
+        return x_t
 
     @staticmethod
     def extract(tensor: Tensor, t: Tensor, desired_shape: Tensor.shape) -> Tensor:
-        # b, *_ = tensor.shape
         out = tensor.gather(-1, t)
         while out.ndim < desired_shape.ndim:
             out = out.contiguous().unsqueeze(-1)
         return out
+
+    @staticmethod
+    def rescale(x: Tensor) -> Tensor:
+        """
+        Rescale linearly to [-1, 1].
+        """
+        frac = (x - x.min()) / (x.max() - x.min())
+        return frac * 2 - 1
