@@ -25,8 +25,8 @@ class Unet(nn.Module):
         device (torch.device, Optional): Device on which the model is trained on.
 
     Shapes:
-        - Input: :math:`(B, in_dim, H, W)`
-        - Output: :math:`(B, out_dim, H, W)`
+        - Input: (B, in_dim, H, W)
+        - Output: (B, out_dim, H, W)
     """
     def __init__(
         self,
@@ -58,8 +58,23 @@ class Unet(nn.Module):
         self.embed_labels = nn.Embedding(n_labels + 1, self.embed_dim)     # (B) -> (B, D)
         self.embed_t = FourierEmbedding(self.embed_dim)
 
-        self.in_layer = ConvBlock(in_dim, dims[0], **{'kernel_size': 3, 'padding': 1})   # c = 1 -> dims[0]
-        self.out_layer = nn.Conv2d(dims[0], out_dim, kernel_size=3, padding=1)
+        self.in_layer = nn.Sequential(
+            nn.Conv2d(in_dim, dims[0], 3, padding=1),
+            nn.BatchNorm2d(dims[0]),
+            nn.GELU(),
+            nn.Conv2d(dims[0], dims[0], 3, padding=1),
+            nn.BatchNorm2d(dims[0]),
+            nn.GELU()
+        )
+        self.out_layer = nn.Sequential(
+            nn.Conv2d(dims[0], dims[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(dims[0]),
+            nn.GELU(),
+            nn.Conv2d(dims[0], dims[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(dims[0]),
+            nn.GELU(),
+            nn.Conv2d(dims[0], out_dim, 3, padding=1),
+        )
 
         self.encoders = nn.ModuleList([])
         self.decoders = nn.ModuleList([])
