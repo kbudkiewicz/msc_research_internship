@@ -2,8 +2,10 @@ import os
 import pandas as pd
 import torch
 import torchvision.transforms.functional as F
+import PIL.Image as pil
 
-from typing import Any, Callable, Optional, Tuple
+from PIL.Image import Image
+from typing import Callable, Optional, Tuple
 from torch import Tensor
 from torch.utils.data import Dataset
 from torchvision.io import decode_image, write_jpeg, ImageReadMode
@@ -129,8 +131,6 @@ class MRIDataset(Dataset):
         sep (str): Separator or delimiter used in the .csv.
         img_dir (os.PathLike or str): Path to directory containing images.
         transform (Callable, optional): Optional transforms to be applied on a sample image.
-        random_transforms (tuple, optional): Tuple of torchvision transforms (Module) to be applied randomly while
-            sampling a batch
 
     The (transformed) images are saved as ``Tensors`` with :math:`CxHxW`, and their according label encoded as an
     integer via the ``label_map``.
@@ -153,19 +153,23 @@ class MRIDataset(Dataset):
     def __getitem__(
         self, idx: int,
         apply_random_transform: bool = False
-    ) -> Tuple[Any, Any]:
+    ) -> Tuple[Image, Tensor]:
+        r"""
+        Returns:
+            - img (PIL.Image): (C, H, W) subset [0,1]
+            - label (torch.LongTensor)
+        """
         if self.img_dir:
             img_path = os.path.join(self.img_dir, self.img_labels.iloc[idx, 0])
         else:
             img_path = self.img_labels.iloc[idx, 0]
         label = torch.tensor(self.img_labels.iloc[idx, 1], dtype=torch.int)
-        img = decode_image(img_path)    # CxHxW
+        img = pil.open(img_path)    # (C, H, W)
 
-        # normalize to [0, 1]
         if self.transform:
             img = self.transform(img)
 
-        return img, label.unsqueeze(-1)
+        return img, label
 
     def __len__(self):
         return len(self.img_labels)
