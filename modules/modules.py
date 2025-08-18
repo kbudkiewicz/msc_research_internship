@@ -267,6 +267,43 @@ class TransformerEncoderBlock(nn.Module):
         return att
 
 
+class ReZeroEncoderBlock(nn.Module):
+    """
+    Basic ReZero Transformer Encoder block. Based on `ReZero is All You Need: Fast Convergence at Large Depth
+    <https://arxiv.org/abs/2003.04887>`_.
+
+    Args:
+        embed_dim (int): Latent dimension of the Multi-head Attention block.
+        n_heads (int): Number of attention heads.
+        dropout_rate (float, Optional): Dropout rate.
+    """
+    def __init__(
+        self,
+        embed_dim: int = 128,
+        n_heads: int = 8,
+        dropout_rate: float = 0.,
+        res_weight: float = 0.,
+        device: Optional[torch.device | str] = None,
+    ):
+        super().__init__()
+        assert 0 <= res_weight <= 1, 'res_weight must be between 0 and 1'
+
+        self.mha = MultiHeadAttention(embed_dim, n_heads=n_heads, dropout_rate=dropout_rate, device=device)
+        self.mlp = MlpBlock(in_dim=embed_dim, out_dim=4*embed_dim, dropout_rate=dropout_rate, device=device)
+        self.res_weight = nn.Parameter(torch.Tensor([res_weight]))
+
+    def forward(self, x: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+        """
+        Args:
+            x (Tensor): Input sequence to the Encoder block
+            mask (Tensor, Optional): Padding mask
+        """
+        x = self.mha(x, x, x, mask=mask) * self.res_weight + x
+        x = self.mlp(x) * self.res_weight + x
+
+        return x
+
+
 class ConvBlock(nn.Module):
     """
     A simple Convolutional block consisting of an activation function, BatchNorm2d and Conv2d, in that order.
@@ -320,8 +357,11 @@ class ResBlock(nn.Module, BaseUnetConfig):
         channels: int,
         t_dim: int,
         label_dim: int,
+        res_weight: float = 0.,
     ):
         super().__init__()
+        assert 0. <= res_weight <= 1., 'res_weight must be between 0 and 1'
+
         self.in_block = ConvBlock(channels, channels, **self.conv_kwargs)
         self.out_block = ConvBlock(channels, channels, **self.conv_kwargs)
         self.time_adapter = nn.Sequential(
@@ -334,6 +374,7 @@ class ResBlock(nn.Module, BaseUnetConfig):
             nn.SiLU(),
             nn.Linear(label_dim, channels),
         )
+        self.res_weight = nn.Parameter(torch.Tensor([res_weight]))
 
     def forward(self, x: Tensor, t_embd: Tensor, labels_embd: Tensor) -> Tensor:
         """
@@ -351,8 +392,7 @@ class ResBlock(nn.Module, BaseUnetConfig):
         x += t_embd
         x += labels_embd
 
-        x = self.out_block(x)
-        x + res
+        x = self.out_block(x) * self.res_weight + res
 
         return x
 
