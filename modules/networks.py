@@ -526,34 +526,30 @@ class DiffusionNet(CustomModel):
 
         assert betas.shape[0] == self.n_timesteps, 'alphas are not defined for all diffusion steps'
         self.alphas = 1. - betas
-        self.alphas_bar = torch.cumsum(self.alphas, dim=0)
+        self.alphas_bar = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alphas_bar = torch.sqrt(self.alphas_bar)
-        self.sqrt_rev_alphas_bar = torch.sqrt(1 - self.alphas_bar)
+        self.sqrt_rev_alphas_bar = torch.sqrt(1. - self.alphas_bar)
 
-    def forward(self, img: Tensor, t: int, labels: Tensor, noise: Optional[Tensor] = None) -> Tensor:
+    def forward(self, img: Tensor, t: Tensor, labels: Tensor, noise: Tensor) -> Tensor:
         """
         Args:
             img (Tensor): Input images.
             t (int): Time point from which the forward trajectory is sampled.
             labels (Tensor): Image class labels.
-            noise (Tensor, optional): Specific noise from which the image is to be sampled. Defaults to None.
+            noise (Tensor, optional): Specific noise from which the image is to be sampled.
 
         Shapes:
             - img: (B, C, H, W)
-            - t: (B,)
-            - labels: (B,)
+            - t: (B)
+            - labels: (B)
             - noise: (B, C, H, W)
         """
-        if not isinstance(t, int):
-            t = torch.randint(0, self.n_timesteps, [img.shape[0],], dtype=torch.long, device=self.device)
-        img = self.rescale(img)
-        x_t = self.sample_q(img, t, noise=noise)     # sample noise from forward trajectory at random t
         labels = self.get_classifier_free_labels(labels)
-        x_t = self.rescale(x_t)
+        x_t = self.sample_q(img, t, noise=noise)     # sample noise from forward trajectory at random t
 
         return self.net(x_t, t, labels)
 
-    def sample_q(self, x_0: Tensor, t: Union[Tensor, int], noise: Optional[Tensor] = None) -> Tensor:
+    def sample_q(self, x_0: Tensor, t: Tensor, noise: Tensor) -> Tensor:
         r"""
         Samples an arbitrary :math:`x_t` from forward diffusion trajectory given a sample from the target distribution
         :math:`x_0`.
@@ -562,7 +558,8 @@ class DiffusionNet(CustomModel):
         using a closed form equation (Equation 4. from `DDPM`):
 
         .. math::
-            q(x_t,x_0) = N(x_t; \sqrt{\bar\alpha_t}x_0, (1-\bar\alpha_t)I)
+            q(x_t,x_0) = N(x_t; \sqrt{\bar\alpha_t}x_0, (1-\bar\alpha_t)I) \to
+            x_t = \sqrt{\bar\alpha_t}x_0 + \sqrt{1 - \bar\alpha_t}\epsilon, \epsilon\sim N(0,I)
 
         Args:
             x_0 (Tensor): Original image / sample from target distribution. Shape (B,) C, H, W)
@@ -585,7 +582,7 @@ class DiffusionNet(CustomModel):
         self,
         img_size: int,
         label: Tensor,
-        n_steps: int = 10.,
+        n_steps: int = 10,
         guidance_scale: float = 1.,
         x_t: Optional[Tensor] = None,
     ) -> Tensor:
@@ -619,11 +616,14 @@ class DiffusionNet(CustomModel):
         for t in reversed(range(n_steps)):
             t = torch.tensor([t], dtype=torch.long, device=self.device)
             z = torch.randn_like(x_t, device=self.device) if t > 1 else 0.
-            a = 1 / torch.sqrt(self.extract(self.alphas, t, x_t))
-            coeff = (1 - self.extract(self.alphas, t, x_t)) / torch.sqrt(self.extract(self.sqrt_rev_alphas_bar, t, x_t))
-            sigma_t = torch.sqrt(self.extract(self.betas, t, x_t))
-            x_t = a * (x_t - coeff * self.forward_cfg(x_t, t, label, guidance_scale)) + sigma_t * z
-            x_t = self.rescale(x_t)
+            fraction = self.betas.gather(-1, t) / self.sqrt_rev_alphas_bar.gather(-1, t)
+            sigma_t = self.sigmas.gather(-1, t)
+
+            x_t.clamp_(-1, 1)
+            x_t = (
+                (x_t - fraction * self.forward_cfg(x_t, t, label, guidance_scale)) / self.sqrt_alphas.gather(-1, t)
+                + sigma_t * z
+            )
 
         return x_t
 

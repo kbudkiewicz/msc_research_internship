@@ -48,8 +48,8 @@ def validate(
             delta = x1 - x0
             loss = mse_loss(model(xt, t.squeeze(), labels), delta)
         elif mode == 'diffusion':
-            t = torch.randint(0, 1000, [x1.shape[0]], dtype=torch.long, device=model.device)
-            loss = mse_loss(model(x1, t, labels=labels, noise=x0), x0)
+            t = torch.randint(1, model.n_timesteps, [x1.shape[0]], dtype=torch.long, device=model.device)
+            loss = mse_loss(model(x1, t=t, labels=labels, noise=x0), x0)
         else:
             raise ValueError('Invalid validation mode.')
 
@@ -62,15 +62,13 @@ def validate(
         img_size = x1.shape[-1]
         for n_steps in {1, 10, 100}:
             print(f'Sampling {n_steps} steps...')
-            img = model.sample_img(x1, n_steps=n_steps)
-            fig = compare_imgs(x1[:8].permute(0, 2, 3, 1), img[:8].permute(0, 2, 3, 1), False, labels[:8])
-            mlflow.log_figure(fig, f'{epoch}[{n_steps}]_validation_imgs.pdf')
-            plt.close(fig)
-
-    # TODO
-    # with torch.no_grad():
-    #     _, reconstruction = model.sample_img(x1[:4], return_reconstruction=True)
-    #     plot_reconstructed_img(reconstruction)
+            img = model.sample_img(
+                img_size=img_size, n_steps=n_steps, label=torch.tensor([1], dtype=torch.long, device=model.device)
+            )
+            if mode == 'diffusion':
+                img.clamp_(-1, 1)
+                # img = (img + 1)/2   # rescale to [0,1]
+            save_image(img, f'./data/assets/{run_name}/{epoch:03}_[{n_steps}]_validation_image.pdf')
 
     return mean_val_loss
 
