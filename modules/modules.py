@@ -195,7 +195,7 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         r"""
-        Expects the input `Tensor` to be of shape `(B,L,D)`, where `B` is the batch size, `L` is the sequence length
+        Expects the input `Tensor` to be of shape `(B, L, D)`, where `B` is the batch size, `L` is the sequence length
         (`Q` for key length, `K` for value length), and `D` is the embedding dimension of the model.
 
         Args:
@@ -205,7 +205,7 @@ class MultiHeadAttention(nn.Module):
             mask (Tensor, Optional): Causal or Padding mask :math:`(B,1,Q,K)`.
 
         Return:
-            - output: :math:`(BxQxD)`
+            - output: :math:`(B,Q,D)`
         """
         b, q_len, d = q.size()  # batch_size, queries_length, model_dim
         _, k_len, _ = k.size()  # keys_length
@@ -311,7 +311,7 @@ class ConvBlock(nn.Module):
     Args:
         in_channels (int): Number of input channels.
         out_channels (int): Number of output channels.
-        activation (nn.Module): Activation layer. Defaults to ``nn.Relu()``
+        activation (nn.Module): Activation layer.
     """
     def __init__(
         self,

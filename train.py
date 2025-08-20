@@ -1,4 +1,3 @@
-import os
 import torch
 import mlflow
 import matplotlib.pyplot as plt
@@ -13,11 +12,9 @@ from data.dataset import MRIDataset
 from modules.networks import Unet, VisionTransformer, FlowMatchingNet, DiffusionNet
 from utils import compare_imgs, EarlyStopper
 
-from torch import Tensor
 from torch.nn.functional import mse_loss
-from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, ConcatDataset, random_split
-from torchvision.transforms.v2 import Compose, RandomRotation, GaussianBlur, ToImage, ToDtype, Normalize
+from torchvision.transforms.v2 import Compose, RandomRotation, GaussianBlur, ToImage, ToDtype
 from torchvision.utils import save_image
 load_dotenv()
 
@@ -66,7 +63,7 @@ def validate(
                 img_size=img_size, n_steps=n_steps, label=torch.tensor([1], dtype=torch.long, device=model.device)
             )
             if mode == 'diffusion':
-                img.clamp_(-1, 1)
+                img.clamp_(0, 1)
                 # img = (img + 1)/2   # rescale to [0,1]
             save_image(img, f'./data/assets/{run_name}/{epoch:03}_[{n_steps}]_validation_image.pdf')
 
@@ -116,9 +113,6 @@ def train(
         model = DiffusionNet(net, 1000, lr, device=device)
     else:
         raise ValueError('Invalid model mode.')
-    if torch.cuda.device_count() > 1:
-        print(f'{torch.cuda.device_count()} GPUs available.')
-        model = DistributedDataParallel(model)
     if config is not None:
         model.set_config(config)
 
@@ -129,7 +123,6 @@ def train(
     basic_transform = Compose([
         ToImage(),
         ToDtype(torch.float, scale=True),
-        Normalize([0.5], [0.5]) if mode == 'diffusion' else Normalize([0.], [1.])
     ])
     training_data, validation_data = random_split(
         MRIDataset(f'./data/preprocessed_{img_size}/annotations.csv', transform=basic_transform),
@@ -186,7 +179,7 @@ def train(
 
             # iterate over the dataset
             for i, batch in enumerate(train_tqdm):
-                x1, labels = batch  # [B, 1, W, H], [B,]
+                x1, labels = batch  # (B, 1, W, H), (B)
                 x1, labels = x1.to(device), labels.to(device)
                 x0 = torch.randn_like(x1, device=device)
 
@@ -196,8 +189,8 @@ def train(
                     delta = x1 - x0
                     loss = model.backprop(model(xt, t.squeeze(), labels), delta, do_return=True)
                 elif mode == 'diffusion':
-                    t = torch.randint(0, 1000, [x1.shape[0]], dtype=torch.long, device=device)    # (B,)
-                    loss = model.backprop(model(x1, t, labels=labels, noise=x0), x0, do_return=True)
+                    t = torch.randint(1, model.n_timesteps, [x1.shape[0]], dtype=torch.long, device=device)  # (B)
+                    loss = model.backprop(model(x1, t=t, labels=labels, noise=x0), x0, do_return=True)
 
                 train_tqdm.set_postfix(training_loss=f'{loss.item():.8f}')
                 train_loss[i] = loss.item()
@@ -270,3 +263,14 @@ if __name__ == '__main__':
     #     patience=6,
     #     mlflow_config=MlflowConfig
     # )
+    train(
+        Unet(64, 128, 256, 512, embed_dim=64),
+        img_size=128,
+        mode='diffusion',
+        lr=1e-3,
+        run_name='unet',
+        epochs=50,
+        patience=10,
+        augmented=False,
+        mlflow_config=MlflowConfig,
+    )

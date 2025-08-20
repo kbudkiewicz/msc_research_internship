@@ -477,7 +477,7 @@ class DiffusionNet(CustomModel):
 
     .. Note::
         The following conventions from the paper are used.
-        :math:`x_0` is the sample from target distribution, where :math:`x_T` is noise
+        :math:`x_0` is the sample from target distribution, where :math:`x_T` is diffused sample at timestep T.
 
     Args:
         model (nn.Module): Diffusion network
@@ -492,26 +492,29 @@ class DiffusionNet(CustomModel):
         timesteps: int,
         beta_1: Union[float, int] = 1e-4,
         beta_t: Union[float, int] = 0.02,
-        device: Optional[torch.device | str] = None,
+        lr: float = 5e-4,
+        device: Optional[Union[torch.device, str]] = None,
     ):
         super().__init__()
-        if device:
-            self.device = device
-        else:
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = device
+        self.net = net
+        self.lr = lr
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
 
         self.net = net.to(device=device)
 
         self.n_timesteps = timesteps
-        if isinstance(beta_1, (float, int)) and not isinstance(beta_t, (float, int)):
-            betas = torch.full([timesteps,], beta_1, dtype=torch.float, device=device)
-        else:
-            betas = torch.linspace(beta_1, beta_t, self.n_timesteps, dtype=torch.float, device=device)
+        betas = beta_t * torch.ones([timesteps], device=self.device)
         self.betas = betas
         self.alphas = 1. - self.betas
+        self.sqrt_alphas = torch.sqrt(self.alphas)
         self.alphas_bar = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alphas_bar = torch.sqrt(self.alphas_bar)
-        self.sqrt_rev_alphas_bar = torch.sqrt(1 - self.alphas_bar)
+        self.sqrt_rev_alphas_bar = torch.sqrt(1. - self.alphas_bar)
+        self.sigmas = torch.sqrt(betas)
+
+        if device:
+            self.to(device)
 
     def register_schedule(self, timesteps: int, betas: Union[float, int]):
         """
@@ -571,10 +574,7 @@ class DiffusionNet(CustomModel):
 
         .. _`DDPM`: https://github.com/hojonathanho/diffusion/blob/master/diffusion_tf/diffusion_utils_2.py#L108
         """
-        if not isinstance(noise, Tensor):
-            noise = torch.randn_like(x_0, device=self.device)
         assert noise.shape == x_0.shape
-
         return self.extract(self.sqrt_alphas_bar, t, x_0) * x_0 + self.extract(self.sqrt_rev_alphas_bar, t, x_0) * noise
 
     @torch.no_grad()
@@ -611,7 +611,7 @@ class DiffusionNet(CustomModel):
         if isinstance(label, int):
             label = torch.tensor([label], dtype=torch.long, device=self.device)
         if not isinstance(x_t, Tensor):
-            x_t = torch.randn([1, 1, img_size, img_size], device=self.device)
+            x_t = torch.rand([1, 1, img_size, img_size], device=self.device)
 
         for t in reversed(range(n_steps)):
             t = torch.tensor([t], dtype=torch.long, device=self.device)
@@ -628,10 +628,10 @@ class DiffusionNet(CustomModel):
         return x_t
 
     @staticmethod
-    def extract(tensor: Tensor, t: Tensor, desired_shape: Tensor.shape) -> Tensor:
+    def extract(tensor: Tensor, t: Tensor, desired_shape: Tensor) -> Tensor:
         out = tensor.gather(-1, t)
         while out.ndim < desired_shape.ndim:
-            out = out.contiguous().unsqueeze(-1)
+            out = out.unsqueeze(-1)
         return out
 
     @staticmethod

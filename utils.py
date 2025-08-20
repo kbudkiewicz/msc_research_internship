@@ -2,7 +2,6 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
 from typing import Iterable, Optional
 from torch import Tensor
 from torch.nn import Module
@@ -67,50 +66,27 @@ def compare_imgs(
         return fig
 
 
-def plot_reconstructed_img(
-        img: Tensor,
-        path: str | os.PathLike = './assets',
-        file_name: str | os.PathLike = 'reconstructed_img.pdf',
-        do_save: bool = False,
-    ) -> None:
+def plot_reverse_process(
+        x: Tensor,
+    ):
     """
-    Plot reconstructed image. The
+    Visualize the reverse process.
 
     Args:
-        img (Tensor): Series of reconstruction steps from :math:`t_start` to :math:`t_end`.
-            Has shape :math:`(T, B, H, W, 1)` or `(T, H, W, 1)`, where `T` is the number of time-steps.
-        path (str | os.PathLike): Location to save the plot.
-        file_name (str | os.PathLike): Name of plot file.
-        do_save (bool): Whether to save the plot.
+        x (Tensor): Series of reconstruction steps from :math:`t_start` to :math:`t_end`.
+            Has shape :math:`(steps, 1, H, W)`
     """
-    img = img.detach()
-    time_steps = img.shape[0] - 1
-    if img.ndim == 5:       # (T, B, H, W, C)
-        b = img.shape[1]
-    elif img.ndim == 4:     # (T, H, W, C)
-        b = 1
-    else:
-        raise ValueError(f'Unexpected image shape: {img.shape}')
+    width = x.shape[0]
+    x = x.detach().cpu().permute(0, 2, 3, 1)
+    fig, axes = plt.subplots(1, width, figsize=(width * 2, 4), sharex=True, sharey=True)
+    fig.subplots_adjust(wspace=0.)
 
-    indices = np.linspace(0., 1., time_steps + 1)
-    fig, axes = plt.subplots(b, ncols=time_steps + 1, figsize=(20, 4*b), tight_layout=True, sharex=True, sharey=True)
+    for idx, ax in enumerate(axes):
+        img = x[idx].numpy().astype(np.float64)
+        ax.set_title(idx)
+        ax.imshow(img)
 
-    axes[0, 0].set_title(f't = 0.00', fontsize=10)
-    if b > 1:
-        for j, ax in enumerate(axes):
-            ax[j].imshow(img[0, j])  # original imgs
-    else:
-        axes[0, 0].imshow(img[0])  # original img
-
-    for i, row in enumerate(axes):
-        row[i + 1].set_title(f't = {indices[i + 1]:.2f}', fontsize=10)
-        for j, col in enumerate(row):
-            col.imshow(img[i + 1, j])
-
-    if do_save:
-        file_path = change_filename_if_taken(path, file_name)
-        plt.savefig(file_path)
-    plt.show()
+    return fig
 
 
 # TODO
