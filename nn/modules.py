@@ -82,13 +82,13 @@ class SinusoidalEmbedding(nn.Module):
         self,
         max_len: int = 512,
         embed_dim: int = 256,
-        dropout_p: float = 0.0,
+        dropout_rate: float = 0.0,
         device: Optional[torch.device | str] = None,
     ):
         super().__init__()
         self.max_len = max_len
         self.embed_dim = embed_dim
-        self.dropout = nn.Dropout(dropout_p)
+        self.dropout = nn.Dropout(dropout_rate)
 
         div_term = torch.exp(
             torch.arange(0, self.embed_dim, 2, device=device) * -(math.log(10_000) / self.embed_dim)
@@ -250,25 +250,19 @@ class TransformerEncoderBlock(nn.Module):
         embed_dim: int = 128,
         n_heads: int = 8,
         dropout_rate: float = 0.0,
-        mlp_dim: Optional[int] = None,
         device: Optional[torch.device | str] = None,
     ):
         super().__init__()
         self.mha = MultiHeadAttention(embed_dim, n_heads=n_heads, dropout_rate=dropout_rate, device=device)
-        self.mlp = MlpBlock(
-            in_dim=embed_dim,
-            out_dim=mlp_dim if mlp_dim else embed_dim,
-            dropout_rate=dropout_rate,
-            device=device
-        )
+        self.mlp = MlpBlock(in_dim=embed_dim, out_dim=4*embed_dim, dropout_rate=dropout_rate, device=device)
         self.layer_norm1 = nn.LayerNorm(embed_dim, device=device)
         self.layer_norm2 = nn.LayerNorm(embed_dim, device=device)
 
     def forward(self, x: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         """
         Args:
-            x (Tensor): Input sequence to the Encoder block
-            mask (Tensor, Optional): Padding mask
+            x (Tensor): Input sequence to the Encoder block. :math:`(B, max_len, embed_dim)`
+            mask (Tensor, Optional): Padding mask :math:`(B, 1, q_len, k_len)`
         """
         att = self.mha(x, x, x, mask=mask)
         res = self.layer_norm1(att) + x
