@@ -9,7 +9,15 @@ from configs import BaseUnetConfig
 
 class MlpBlock(nn.Module):
     """
-    Default MLP Block for ViT Encoder Block.
+    Default MLP Block for ViT Encoder Block. The block consists of a linear layer, activation function, dropout and
+    linear layer, in that order.
+
+    Args:
+        in_dim (int): Dimension of input features.
+        out_dim (int): Dimension of output features.
+        activation (nn.Module): Activation function.
+        dropout_rate (float): Dropout probability.
+        device (optional, torch.device, str): Device used for computation.
     """
     def __init__(
         self,
@@ -58,12 +66,13 @@ class FourierEmbedding(nn.Module):
 
 class SinusoidalEmbedding(nn.Module):
     """
-    Adds a sinusoidal embedding to the input. The embedding is broadcasted for batched inputs too.
+    Adds a sinusoidal embedding to the input. The embedding is broadcast for batched inputs too.
 
     Args:
         max_len(int, Optional): Maximum context window.
         embed_dim (int): Embedding dimension.
-        dropout_p (float): Dropout probability.
+        dropout_rate (float): Dropout probability.
+        device (optional, torch.device, str): Device used for computation.
 
     Shapes:
         - Input (Tensor):  (batch_size,) max_len
@@ -232,7 +241,9 @@ class TransformerEncoderBlock(nn.Module):
 
     Args:
         embed_dim (int): Latent dimension of the Multi-head Attention block.
-        mlp_dim (int, Optional): Latent dimension of the MLP of the Encoder block.
+        n_heads (int): Number of attention heads.
+        dropout_rate (float): Dropout rate.
+        device (optional, torch.device, str): Device used for computation.
     """
     def __init__(
         self,
@@ -343,9 +354,8 @@ class ResBlock(nn.Module, BaseUnetConfig):
 
     Args:
         channels (int): Number of input and output channels.
-        depth (int): Number of repeated layer.
-        do_upscale (bool, Optional): Whether the residual block is an up-scaling or down-scaling block. Defaults to
-            `True`. Depending on the value additional Pooling or Up-sampling layers are initialized, respectively.
+        t_dim (int): Dimension of time-adapter embedding.
+        label_dim (int): Dimension of label embedding.
 
     Shapes:
         - Input: :math:`(B, C_in, H, W)`
