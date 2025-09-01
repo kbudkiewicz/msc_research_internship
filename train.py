@@ -8,8 +8,8 @@ from math import ceil
 from dotenv import load_dotenv
 from typing import Optional
 from configs import *
-from data.dataset import MRIDataset
-from modules.networks import Unet, VisionTransformer, FlowMatchingNet, DiffusionNet
+from data.sets import MRIDataset, SmithsonianButterfliesDataset
+from nn.networks import Unet, VisionTransformer, FlowMatchingNet, DiffusionNet
 from utils import compare_imgs, EarlyStopper
 
 from torch.nn.functional import mse_loss
@@ -71,12 +71,13 @@ def validate(
 
 
 def train(
+        dataset,
         net: torch.nn.Module,
         img_size: int,
         epochs: int = 1,
         batch_size: int = 64,
         lr: float = 5e-4,
-        run_name: str = 'default',
+        weight_decay: float = 0.,
         path: str | os.PathLike = './checkpoints',
         mode: str = 'flow-matching',
         augmented: bool = True,
@@ -85,11 +86,11 @@ def train(
         mlflow_config: Optional[object] = None,
     ) -> None:
     """
-    Train a Flow-Matching network on MRI data.
+    Train a model.
 
     Args:
-        run_name (str): Name of experiment to identify  the run.
-        net (nn.Module): FlowMatching network.
+        dataset: Dataset to train the model on.
+        net (nn.Module): Flow-Matching or Diffusion network.
         img_size (int): Image width on which to train on.
         epochs (int): Number of training epochs. One epoch is equivalent to a full iteration over the dataset.
         batch_size (int): Batch size.
@@ -101,7 +102,7 @@ def train(
         mlflow_config (object, optional): Config class of Mlflow experiment.
         mode (str): Type of model to be trained. Either `flow-matching` or `diffusion`.
     """
-    run_name = mode + '_' + run_name + f'_{img_size}'
+    run_name = mode + '_' + f'{net.__class__.__name__}'.lower() + f'_{img_size}'
     experiment_path = os.path.join(path, run_name)
     if not os.path.isdir(f'./data/assets/{run_name}'):
         os.makedirs(f'./data/assets/{run_name}', exist_ok=True)
@@ -125,20 +126,14 @@ def train(
         ToDtype(torch.float, scale=True),
     ])
     training_data, validation_data = random_split(
-        MRIDataset(f'./data/preprocessed_{img_size}/annotations.csv', transform=basic_transform),
-        [0.9, 0.1],
-        torch.manual_seed(42)   # for reproducible validation set
+        dataset(img_size=img_size, transform=basic_transform), [0.9, 0.1], torch.manual_seed(42)
+        # seed for a reproducible validation set
     )
     if augmented:
-        gaussian_blurred = MRIDataset(
-            f'./data/preprocessed_{img_size}/annotations.csv',
-            transform=Compose([GaussianBlur(kernel_size=11, sigma=5.), basic_transform])
-        )
-        rotated = MRIDataset(
-            f'./data/preprocessed_{img_size}/annotations.csv',
-            transform=Compose([RandomRotation(15), basic_transform])
-        )
-        training_data = ConcatDataset([training_data, gaussian_blurred, rotated])
+        for transform in [GaussianBlur(kernel_size=9, sigma=3.), RandomRotation(30)]:
+            augmented_transform = Compose([transform, basic_transform])
+            augmented_data = dataset(img_size=img_size, transform=augmented_transform)
+            training_data = ConcatDataset([training_data, augmented_data])
     train_loader = DataLoader(training_data, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(validation_data, batch_size=batch_size, drop_last=True)
 
@@ -160,6 +155,7 @@ def train(
         'learning_rate': lr,
         'patience': patience,
         'epochs': epochs,
+        'dataset': dataset.__class__.__name__,
         'augmented': augmented,
         'device': model.device,
     })
@@ -170,10 +166,7 @@ def train(
         model.train()
         for epoch in range(epochs):
             train_tqdm = tqdm(
-                train_loader,
-                total=len(train_loader),
-                desc=f'Training Epoch [{epoch}/{epochs - 1}]',
-                ncols=100
+                train_loader, total=len(train_loader), desc=f'Training Epoch [{epoch}/{epochs - 1}]', ncols=100
             )
             train_loss = torch.randn(len(train_loader), dtype=torch.float32, device=device, requires_grad=False)
 
