@@ -108,9 +108,9 @@ def train(
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if mode == 'flow-matching':
-        model = FlowMatchingNet(net, lr, device=device)
+        model = FlowMatchingNet(net, lr=lr, weight_decay=weight_decay, device=device)
     elif mode == 'diffusion':
-        model = DiffusionNet(net, 1000, lr, device=device)
+        model = DiffusionNet(net, 1000, lr=lr, weight_decay=weight_decay, device=device)
     else:
         raise ValueError('Invalid model mode.')
     if config is not None:
@@ -154,7 +154,7 @@ def train(
     mlflow.log_params({
         'model_mode': mode,
         'model_class': model.net.__class__.__name__,
-        'model_config': config,
+        'model_config': model.net.get_config(),
         'img_size': img_size,
         'batch_size': batch_size,
         'learning_rate': lr,
