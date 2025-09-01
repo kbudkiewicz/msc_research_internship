@@ -19,7 +19,7 @@ class MRIDataset(Dataset):
     All required paths are absolute.
 
     Args:
-        annotations_file_path(os.PathLike or str): Path to annotations file.
+        img_size (int): The desired size of images.
         sep (str): Separator or delimiter used in the .csv.
         img_dir (os.PathLike or str): Path to directory containing images.
         transform (Callable, optional): Optional transforms to be applied on a sample image.
@@ -29,13 +29,14 @@ class MRIDataset(Dataset):
     """
     def __init__(
         self,
-        annotations_file_path: os.PathLike | str,
+        img_size: int,
         sep: str = ',',
         img_dir: Optional[os.PathLike | str] = None,
         transform: Optional[Callable] = None,
     ) -> None:
         if img_dir:
             assert os.path.isdir(img_dir), f'Directory {img_dir} does not exist!'
+        annotations_file_path = f'./data/preprocessed_{img_size}/annotations.csv'
         assert os.path.exists(annotations_file_path), 'annotations_file does not exist!'
         self.img_dir = img_dir
         self.img_labels = pd.read_csv(annotations_file_path, sep=sep)
@@ -70,8 +71,8 @@ class SmithsonianButterfliesDataset(Dataset):
 
     The target classes (N=178) are chosen here to be the lowest level of taxonomic classification.
     """
-    def __init__(self, desired_size: int, transform: Optional[Callable] = None):
-        self.desired_size = desired_size
+    def __init__(self, img_size: int, transform: Optional[Callable] = None):
+        self.img_size = img_size
         self.data = load_dataset("ceyda/smithsonian_butterflies", num_proc=2)['train']
         self.transform = transform
         self.str_to_int, self.n_labels = self.setup_labels_map()
@@ -98,7 +99,7 @@ class SmithsonianButterfliesDataset(Dataset):
         img = grayscale(img)
         # w, h = img.size
         # img = img.crop((0, 0, 1600, h))     # remove the ruler from the image
-        img = pad(image=img, size=(self.desired_size, self.desired_size), color=255)    # pad with white
+        img = pad(image=img, size=(self.img_size, self.img_size), color=255)    # pad with white
 
         if self.transform:
             img = self.transform(img)
