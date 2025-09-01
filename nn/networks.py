@@ -154,28 +154,18 @@ class VisionTransformer(nn.Module):
         n_heads: int = 8,
         n_labels: int = 4,
         dropout_rate: float = 0.0,
-        config: Optional[dataclass] = None,
-        device: Optional[torch.device | str] = None,
+        device: Optional[Union[torch.device, str]] = None,
     ):
         super().__init__()
-
-        if config:
-            for k, v in config.__dict__.items():
-                if k[0] != '_':
-                    self.__setattr__(k, v)
-        else:
-            self.patch_size = patch_size
-            self.embed_dim = embed_dim
-            self.mlp_dim = mlp_dim
-            self.n_heads = n_heads
-            self.dropout_rate = dropout_rate
-            self.null_token = n_labels
+        self.in_channels = in_channels
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.n_heads = n_heads
         self.n_labels = n_labels
+        self.dropout_rate = dropout_rate
+        self.device = device
+        self.null_token = n_labels
         self.n_patches = int(img_size ** 2 / self.patch_size ** 2)
-        if device is None:
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        else:
-            self.device = device
 
         # Embeddings
         self.pos_embd = nn.Embedding(self.n_patches, self.embed_dim)
@@ -192,12 +182,10 @@ class VisionTransformer(nn.Module):
         )
         self.patch_embd = nn.Conv2d(self.in_channels, self.embed_dim, self.patch_size, self.patch_size)
         self.encoder = nn.ModuleList(
-            TransformerEncoderBlock(
+            ReZeroEncoderBlock(
                 embed_dim=self.embed_dim,
-                mlp_dim=int(4 * self.embed_dim),
                 n_heads=self.n_heads,
-                dropout_rate=self.dropout_rate,
-                device=self.device
+                dropout_rate=self.dropout_rate
             )
             for _ in range(depth_encoder)
         )
@@ -206,7 +194,9 @@ class VisionTransformer(nn.Module):
             nn.Linear(self.embed_dim, self.in_channels * self.patch_size**2),
         )
 
-        self.to(self.device)
+        self.config = self.get_config()
+        if device:
+            self.to(self.device)
 
     def forward(self, img: Tensor, t: Tensor, labels: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         """Pass a batch of images and mask to Vision Transformer.
@@ -356,10 +346,15 @@ class CustomModel(nn.Module):
             raise TypeError(f'Config must be a dict, but got {type(config)}')
 
     def get_config(self) -> dict:
-        if self.net.config is not None:
-            return self.net.config
-        else:
-            return {k: v for k, v in self.net.__dict__.items() if not k.startswith('_')}
+        return {
+            'n_labels': self.n_labels,
+            'in_channels': self.in_channels,
+            'patch_size': self.patch_size,
+            'n_patches': self.n_patches,
+            'embed_dim': self.embed_dim,
+            'n_heads': self.n_heads,
+            'dropout_rate': self.dropout_rate,
+        }
 
 
 class FlowMatchingNet(CustomModel):
