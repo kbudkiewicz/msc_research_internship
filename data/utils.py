@@ -1,0 +1,113 @@
+import os
+import torch
+import torchvision.transforms.functional as F
+
+from torchvision.io import decode_image, write_jpeg, ImageReadMode
+
+data_label_mapping = {
+    'notumor': 0,
+    'glioma': 1,
+    'meningioma': 2,
+    'pituitary': 3
+}
+
+
+def create_annotations_file(
+        path: os.PathLike | str = './preprocessed',
+        filename: str = 'annotations.csv',
+        sep: str = ',',
+    ) -> None:
+    """
+    Create an annotation .csv file for the Dataset. If no path is provided, the file will be saved in current directory.
+    The annotation file contains the *absolute* paths to the respective samples / images.
+
+    Args:
+        path (os.PathLike, str): Path to the folder containing the training dataset. Annotation file is created there.
+        filename (str): Name of the annotation file.
+        sep (str): Separator used to separate data in the annotation file. Default is a comma.
+
+    .. Note::
+        The annotation file is created with `.csv` extension in ``/path``, e.g., ``path='preprocessed'`` it will be
+        created in ./preprocessed.
+    """
+    destination_path = os.path.join(path, filename)
+    assert os.path.exists(path), f'The path {path} does not exist. Make sure path is an existing directory.'
+
+    with open(destination_path, 'w') as f:
+        for root, _, files in os.walk(path):
+            _, label_str = os.path.split(root)
+            # check if dir describes a tumor type
+            if label_str in data_label_mapping.keys():
+                label = data_label_mapping[label_str]
+                # save sample name with according label
+                for sample_name in files:
+                    if sample_name.endswith('.jpg'):
+                        image_path = os.path.join(root, sample_name)
+                        abs_path = os.path.abspath(image_path)
+                        f.write(f'{abs_path}{sep}{label}\n')
+
+
+def preprocess(
+        final_img_size: int = 512,
+        original_dir_path: os.PathLike | str = './original/training',
+        preprocessed_dir: os.PathLike | str = './preprocessed',
+    ) -> None:
+    """
+    Preprocess training data into a new directory. The image files are rewritten into `.jpeg`.
+
+    Args:
+        final_img_size (int): Final height and width of the preprocessed image. Defaults to 512.
+        original_dir_path (os.PathLike, str): Path to the original training dataset.
+        preprocessed_dir (os.PathLike, str): Path to the new, preprocessed training dataset.
+
+    .. note::
+        The data is preprocessed with similarly (if not exactly) as in `Deep Residual Learning for Image Recognition
+        <https://arxiv.org/abs/1512.03385>`__ or `ImageNet Classification with Deep Convolutional Neural Networks
+        <https://papers.nips.cc/paper_files/paper/2012/hash/c399862d3b9d6b76c8436e924a68c45b-Abstract.html>`__.
+
+        The images are first padded with 0. along the shorter dimension of height or width. Then they are resized to
+        (512, 512).
+    """
+    preprocessed_dir += f'_{final_img_size}'
+    if not os.path.isdir(preprocessed_dir):
+        print(f'Path {preprocessed_dir} does not exist.\nCreating directory {preprocessed_dir}...')
+        os.mkdir(preprocessed_dir)
+        os.mkdir(os.path.join(preprocessed_dir, 'training'))
+
+    # preprocess every file from /dir_path into /preprocessed
+    for dirpath, dirnames, filenames in os.walk(original_dir_path):
+        for dir in dirnames:
+            sub_dir = os.path.join(dirpath, dir).replace('./original', preprocessed_dir)
+            if not os.path.isdir(sub_dir):
+                os.mkdir(sub_dir)
+                print(f'Directory {sub_dir} created.')
+
+        for filename in filenames:
+            if filename.endswith('.jpg'):
+                img_path = os.path.join(dirpath, filename)
+                destination_path = img_path.replace('./original', preprocessed_dir).replace('\\', '/')
+                img_tensor = decode_image(img_path, mode=ImageReadMode.GRAY)
+                assert img_tensor.ndim == 3, f'Image tensor must be a 3D tensor but is {img_tensor.shape}.'
+                # assert img_tensor.shape[0] in {1, 3}, f'Number of channels must be 1 but is {img_tensor.shape[0]}.'
+
+                # pad to an aspect ratio ~1:1
+                if img_tensor.shape[1] != img_tensor.shape[2]:
+                    width_is_bigger = img_tensor.shape[1] > img_tensor.shape[2]
+                    diff = abs(img_tensor.shape[1] - img_tensor.shape[2])
+                    if width_is_bigger:
+                        img_tensor = F.pad(img_tensor, [diff//2, 0])
+                    elif not width_is_bigger:
+                        img_tensor = F.pad(img_tensor, [0, diff//2])
+
+                # resize to the desired W and H
+                if img_tensor.shape[-2:] != [final_img_size, final_img_size]:
+                    img_tensor = F.resize(img_tensor, [final_img_size, final_img_size])
+                assert img_tensor.shape[-2:] == torch.Size([final_img_size, final_img_size]), \
+                    f'Image was not resized. Got: {img_tensor.shape}'
+                write_jpeg(img_tensor, destination_path)
+            else:
+                continue
+
+    print('Preprocessing finished. Creating annotations file...')
+    create_annotations_file(preprocessed_dir)
+    print('Done.')
