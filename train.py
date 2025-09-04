@@ -230,40 +230,23 @@ def train(
 
 
 if __name__ == '__main__':
-    train(
-        Unet(64, 128, 256, 512, embed_dim=128),
-        128,
-        lr=1e-4,
-        run_name='unet',
-        epochs=100,
-        patience=10,
-        augmented=True,
-        mlflow_config=MlflowConfig,
-    )
-    # train(
-    #     VisionTransformer(
-    #         128,
-    #         in_channels=1,
-    #         depth_encoder=5,
-    #         n_heads=16,
-    #         patch_size=16,
-    #         embed_dim=512,
-    #     ),
-    #     128,
-    #     run_name='vit',
-    #     epochs=60,
-    #     augmented=True,
-    #     patience=6,
-    #     mlflow_config=MlflowConfig
+    # NOTE: if CUDA does not have enough memory, try reducing batch size to make the data fit
+    # FM & DM VIT128:
+    # VisionTransformer(
+    #     img_size=img_size,
+    #     in_channels=1,
+    #     depth_encoder=12,
+    #     n_heads=16,
+    #     patch_size=16,
+    #     embed_dim=512, # or 1024
+    #     dropout_rate=0.1,
     # )
+    img_size = 256
+    mode = 'flow-matching'  # 'diffusion' or 'flow-matching
+    dataset = SmithsonianButterfliesDataset
+    net = Unet(16, 32, 64, 128, embed_dim=64)  # 32, ..., 512 best for MRI,
+
     train(
-        Unet(64, 128, 256, 512, embed_dim=64),
-        img_size=128,
-        mode='diffusion',
-        lr=1e-3,
-        run_name='unet',
-        epochs=50,
-        patience=10,
-        augmented=False,
+        dataset=dataset, net=net, img_size=img_size, mode=mode, lr=1e-5, epochs=50, patience=0, augmented=True,
         mlflow_config=MlflowConfig,
     )
