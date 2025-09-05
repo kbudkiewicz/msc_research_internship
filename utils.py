@@ -89,33 +89,40 @@ def plot_reverse_process(
     return fig
 
 
-# TODO
+@torch.no_grad()
 def plot_variable_guidance_scale(
-        model: Module,
-        guidance_scale: int | Iterable,
-        labels: Optional[Tensor] = None,
-        path: str | os.PathLike = None,
-        do_save: bool = False
-    ) -> None:
-
-    if not isinstance(guidance_scale, (float, Iterable[float])):
-        raise ValueError(f'Invalid guidance_scale value: {guidance_scale}')
-    if not isinstance(labels, (int, Iterable[int])):
+    model: Module,
+    img_size: int,
+    guidance_scale: Iterable[float],
+    labels: Iterable[int],
+    do_save: bool = False,
+    path: Union[str, os.PathLike] = None,
+) -> None:
+    if not isinstance(labels, Iterable):
         raise ValueError(f'Invalid labels value: {labels}')
+    if not isinstance(guidance_scale, Iterable):
+        raise ValueError(f'Invalid guidance_scale value: {guidance_scale}')
 
-    if isinstance(guidance_scale, Iterable) or isinstance(guidance_scale, Iterable):
-        fig, axes = plt.subplots(len(labels), len(guidance_scale))
-        for i, val in enumerate(guidance_scale):
-            axes[i].imshow(val)
-    else:
-        pass
+    model = model.eval()
+    fig = plt.figure(figsize=(16, 8))
+    grid = ImageGrid(fig, 111, nrows_ncols=(len(labels), len(guidance_scale)), axes_pad=0)
 
-    # noise = torch.randn()
-    # output = model.forward_cfg(guidance_scale=guidance_scale)
+    imgs = []
+    for label in labels:
+        for w in guidance_scale:
+            label = torch.tensor([label], dtype=torch.long, requires_grad=False, device=model.device)
+            img = model.sample_img(img_size=img_size, label=label, guidance_scale=w, n_steps=1000)
+            img.clamp_(0, 1)
+            img = img.permute(0, 2, 3, 1).cpu().detach()[0]
+            imgs.append(img)
+
+    for ax, img in zip(grid, imgs):
+        ax.imshow(img)
 
     if do_save:
-        plt.savefig(path + '/variable_guidance_scale.png')
-    plt.show()
+        plt.savefig(path + '/variable_guidance_scale.pdf')
+    else:
+        plt.show()
 
 
 def plot_metrics(data: pd.DataFrame) -> None:
