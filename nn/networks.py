@@ -2,16 +2,15 @@ import torch
 import torch.nn as nn
 
 from math import sqrt
-from abc import abstractmethod
-from dataclasses import dataclass
-from typing import Callable, Optional, Iterable, Union
-from modules.modules import FourierEmbedding, TransformerEncoderBlock, ResBlock, ConvBlock, Rescaler
+from typing import Optional, Iterable, Union
+from .base_class import BaseModel
+from .modules import FourierEmbedding, TransformerEncoderBlock, ReZeroEncoderBlock, ResBlock, ConvBlock, Rescaler
 from torch import Tensor
 
 
 class Unet(nn.Module):
     r"""
-    Basic `UNet <http://arxiv.org/abs/1505.04597>`_ implementation.
+    Basic `UNet <https://arxiv.org/abs/1505.04597>`_ implementation.
 
     A cache is used to save the cropped tensors for the successive skip-connections to  the ``UpscaleBlocks`` of the
     network decoder.
@@ -21,7 +20,6 @@ class Unet(nn.Module):
             but does include the latent dimension
         embed_dim (int): Embedding dimension of time-steps and labels.
         n_labels (int): Number of labels of the dataset. Default is 4.
-        config (object, Optional): Configuration class containing new set of hyper parameters.
         device (torch.device, Optional): Device on which the model is trained on.
 
     Shapes:
@@ -35,28 +33,29 @@ class Unet(nn.Module):
         in_dim: int = 1,
         out_dim: int = 1,
         residual_depth: int = 3,
-        n_labels: int = 4,  # num_classes \equiv glioma, notumor, ... = 4
-        config: object = BaseUnetConfig,
-        device: Optional[torch.device | str] = None,
+        n_labels: int = 178,  # num_classes \equiv glioma, notumor, ... = 4, 178 for butterflies
+        device: Optional[Union[torch.device, str]] = None,
     ):
         super().__init__()
-        if config:
-            [self.__setattr__(k, v) for k, v in config.__dict__.items() if k[0] != '_']
         if not isinstance(dims, Iterable):
             raise ValueError(f'Unet dims must be an Iterable of ints but is {type(dims)}')
         assert len(dims) > 1, 'dims must contain at least 2 integers'
 
         self.cache = {}
-        self.in_dim = in_dim
-        self.out_dim = out_dim
         self.dims = dims
         self.embed_dim = embed_dim
+        self.in_dim = in_dim
+        self.out_dim = out_dim
         self.depth = residual_depth
-        self.null_token = n_labels
+        self.n_labels, self.null_token = n_labels, n_labels
 
         # additional label ('null token') for unconditional model training
         self.embed_labels = nn.Embedding(n_labels + 1, self.embed_dim)     # (B) -> (B, D)
-        self.embed_t = FourierEmbedding(self.embed_dim)
+        self.embed_t = nn.Sequential(
+            FourierEmbedding(self.embed_dim),
+            nn.Linear(self.embed_dim, embed_dim),
+            nn.GELU(),
+        )
 
         self.in_layer = nn.Sequential(
             nn.Conv2d(in_dim, dims[0], 3, padding=1),
@@ -85,6 +84,7 @@ class Unet(nn.Module):
             ResBlock(dims[-1], self.embed_dim, self.embed_dim) for _ in range(self.depth)
         ])
 
+        self.config = self.get_config()
         if device:
             self.to(device)
 
@@ -124,6 +124,15 @@ class Unet(nn.Module):
 
         return x
 
+    def get_config(self) -> dict:
+        return {
+            'dims': self.dims,
+            'in_dim': self.in_dim,
+            'out_dim': self.out_dim,
+            'embed_dim': self.embed_dim,
+            'depth': self.depth,
+        }
+
 
 class VisionTransformer(nn.Module):
     """
@@ -152,7 +161,7 @@ class VisionTransformer(nn.Module):
         patch_size: int = 16,
         embed_dim: int = 256,
         n_heads: int = 8,
-        n_labels: int = 4,
+        n_labels: int = 178,
         dropout_rate: float = 0.0,
         device: Optional[Union[torch.device, str]] = None,
     ):
@@ -161,10 +170,9 @@ class VisionTransformer(nn.Module):
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.n_heads = n_heads
-        self.n_labels = n_labels
+        self.n_labels, self.null_token = n_labels, n_labels
         self.dropout_rate = dropout_rate
         self.device = device
-        self.null_token = n_labels
         self.n_patches = int(img_size ** 2 / self.patch_size ** 2)
 
         # Embeddings
@@ -244,107 +252,6 @@ class VisionTransformer(nn.Module):
 
         return img
 
-
-class CustomModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward_cfg(self, x_t: Tensor, t: Tensor, labels: Tensor, guidance_scale: float = 1.) -> Tensor:
-        r"""
-        Return Classifier-Free score. Used at *inference time only* for qualitative analysis.
-
-        .. math::
-            \tilde\epsilon_\theta = w\epsilon_\theta(x,c) + (1-w) \epsilon_\theta(x,\emptyset)
-
-        where :math:`\emptyset` is the null token for unconditional training.
-
-        Shapes:
-            - x_t: (B, C, H, W)
-            - t: (B, )
-            - labels: (B, )
-            - Output: Tensor of shape (B, C, H, W)
-        """
-        null_labels = torch.full_like(labels, 4, dtype=torch.long, device=self.device)  # (B,)
-        return (1. - guidance_scale) * self.net(x_t, t, null_labels) + guidance_scale * self.net(x_t, t, labels)
-
-    def get_classifier_free_labels(self, labels: Tensor, rate: float = 0.2) -> Tensor:
-        r"""
-        Get classifier-free labels for the model by randomly setting some labels to a null token. Based off
-        `Classifier-Free Diffusion Guidance <http://arxiv.org/abs/2207.12598>`_. Also see MIT 6.S184 lecture for
-        the implementation.
-
-        The original labels are substituted are replaced with a fixed null token :math:`\emptyset` for training the
-        unconditional classifier. The labels are substituted only if :math:`p_\text{uncond}` is less then a randomly
-        sampled float from [0,1].
-
-        Args:
-            labels (Tensor): Labels for each image. Dtype has to be ``torch.float``.
-            rate (float): Probability of substitution of a conditional image label with a null token.
-        """
-        p_uncond = torch.rand(labels.shape[0], device=self.device)
-        labels = torch.where(p_uncond < rate, 4, labels)  # 4. as the null token
-
-        return labels
-
-    @abstractmethod
-    def sample_img(self, *args, **kwargs) -> Tensor:
-        raise NotImplementedError
-
-    def backprop(
-        self,
-        y1: Tensor,
-        y2: Tensor,
-        loss_fnc: Callable[[Tensor, Tensor], Tensor] = mse_loss,
-        do_return: bool = False
-    ) -> Tensor | None:
-        """
-        Perform a backpropagation step. If no ``loss_fnc`` is not provided, the loss defaults to MSE.
-
-        Args:
-            y1 (Tensor): Output of forward pass.
-            y2 (Tensor): Expected (true) value.
-            loss_fnc (Callable, nn.Module): Loss function to be minimised.
-            do_return (bool): Whether to return the loss value. Defaults to ``False``.
-        """
-        assert isinstance(loss_fnc, Callable), f'The loss function must be Callable but is {type(loss_fnc)}.'
-        try:
-            loss = loss_fnc(y1, y2)
-        except NameError or TypeError:
-            loss = torch.nn.functional.mse_loss(y1, y2)
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 100)
-        self.optimizer.step()
-
-        if do_return:
-            return loss
-
-    def save_checkpoint(self, path: str | os.PathLike) -> None:
-        """
-        ``path`` should be a path to the repo root.
-        """
-        if not os.path.exists('./checkpoints'):
-            os.mkdir('./checkpoints')
-        path = os.path.join('./checkpoints', path)
-        self.save_state_dict(path, 'checkpoint.pt')
-
-    def save_state_dict(self, path: str | os.PathLike, filename: Optional[str | os.PathLike] = None) -> None:
-        filename = filename if filename else 'params.pt'
-        if not os.path.exists(path):
-            torch.save(self.state_dict(), filename)
-        else:
-            torch.save(self.state_dict(), os.path.join(path, filename))
-
-    def set_config(self, config: object) -> None:
-        """
-        Set network attributes to those found in ``config``.
-        """
-        if isinstance(config, object):
-            [self.net.__setattr__(k, v) for k, v in config.__dict__.items() if not k.startswith('_')]
-        else:
-            raise TypeError(f'Config must be a dict, but got {type(config)}')
-
     def get_config(self) -> dict:
         return {
             'n_labels': self.n_labels,
@@ -376,20 +283,18 @@ class FlowMatchingNet(CustomModel):
         guidance_scale: float = 3.,
         classifier_free_rate: float = 0.1,
         lr: float = 5e-4,
-        weight_decay: float = 0.0,
-        config: Optional[object] = None,
+        weight_decay: float = 0.,
         device: Optional[Union[torch.device, str]] = None,
     ):
         super().__init__()
         self.device = device
         self.net = net
-        if config:
-            self.set_config(config)
         self.guidance_scale = guidance_scale
         self.classifier_free_rate = classifier_free_rate
         self.lr = lr
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=weight_decay)
         if device:
+            self.net.to(device)
             self.to(device)
 
     def forward(self, x_t: Tensor, t: Tensor, labels: Tensor) -> Tensor:
@@ -419,6 +324,7 @@ class FlowMatchingNet(CustomModel):
             guidance_scale=guidance_scale
         )
 
+    @torch.no_grad()
     def sample_img(self, img_size: int, label: Tensor, n_steps: int = 50, guidance_scale: float = 1.):
         if not isinstance(img_size, int):
             raise TypeError(f'img_size must be int but is {type(img_size)}')
@@ -477,8 +383,7 @@ class DiffusionNet(CustomModel):
     Args:
         model (nn.Module): Diffusion network
         timesteps (int): Number of diffusion steps
-        beta_1 (Tensor, float, int):
-            Beta schedule. If int or float are provided a constant schedule is instantiated by default.
+        beta_t (float, int): Final variance.
         device (torch.device, str, Optional): Device used for computation
     """
     def __init__(
@@ -488,13 +393,14 @@ class DiffusionNet(CustomModel):
         beta_1: Union[float, int] = 1e-4,
         beta_t: Union[float, int] = 0.02,
         lr: float = 5e-4,
+        weight_decay: float = 0.,
         device: Optional[Union[torch.device, str]] = None,
     ):
         super().__init__()
         self.device = device
         self.net = net
         self.lr = lr
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=weight_decay)
 
         self.net = net.to(device=device)
 
@@ -509,6 +415,7 @@ class DiffusionNet(CustomModel):
         self.sigmas = torch.sqrt(betas)
 
         if device:
+            self.net.to(device)
             self.to(device)
 
     def register_schedule(self, timesteps: int, betas: Union[float, int]):
