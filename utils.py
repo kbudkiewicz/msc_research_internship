@@ -93,6 +93,7 @@ def plot_reverse_process(
 def plot_variable_guidance_scale(
     model: Module,
     img_size: int,
+    n_steps: int,
     guidance_scale: Iterable[float],
     labels: Iterable[int],
     do_save: bool = False,
@@ -104,21 +105,25 @@ def plot_variable_guidance_scale(
         raise ValueError(f'Invalid guidance_scale value: {guidance_scale}')
 
     model = model.eval()
-    fig = plt.figure(figsize=(16, 8))
+    fig = plt.figure(figsize=(16, 6))
     grid = ImageGrid(fig, 111, nrows_ncols=(len(labels), len(guidance_scale)), axes_pad=0)
 
     imgs = []
-    for label in labels:
-        for w in guidance_scale:
+    for i, label in enumerate(labels):
+        # grid.axes_row[i][0].set_ylabel(f'{label=}')
+        for j, w in enumerate(guidance_scale):
+            grid.axes_row[0][j].set_title(f'{w=}')
             label = torch.tensor([label], dtype=torch.long, requires_grad=False, device=model.device)
-            img = model.sample_img(img_size=img_size, label=label, guidance_scale=w, n_steps=1000)
+            img = model.sample_img(img_size=img_size, label=label, guidance_scale=w, n_steps=n_steps)
             img.clamp_(0, 1)
             img = img.permute(0, 2, 3, 1).cpu().detach()[0]
             imgs.append(img)
 
     for ax, img in zip(grid, imgs):
-        ax.imshow(img)
+        ax.imshow(img, cmap='gray')
+        ax.axis('off')
 
+    plt.tight_layout()
     if do_save:
         plt.savefig(path + '/variable_guidance_scale.pdf')
     else:
