@@ -33,13 +33,18 @@ class MRIDataset(Dataset):
         sep: str = ',',
         img_dir: Optional[os.PathLike | str] = None,
         transform: Optional[Callable] = None,
+        path: str = None
     ) -> None:
         if img_dir:
             assert os.path.isdir(img_dir), f'Directory {img_dir} does not exist!'
-        annotations_file_path = f'./data/preprocessed_{img_size}/annotations.csv'
-        assert os.path.exists(annotations_file_path), 'annotations_file does not exist!'
+        if path:
+            annotations_file_path = os.path.join(path, 'annotations.csv')
+        else:
+            annotations_file_path = f'./data/preprocessed_{img_size}/annotations.csv'
+        assert os.path.exists(annotations_file_path)
         self.img_dir = img_dir
         self.img_labels = pd.read_csv(annotations_file_path, sep=sep)
+        self.n_labels = len(pd.unique(self.img_labels.iloc[:, 1]))
         self.transform = transform
 
     def __getitem__(self, idx: int) -> Tuple[Image, Tensor]:
