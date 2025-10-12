@@ -2,11 +2,11 @@ import os
 import torch
 import pandas as pd
 import PIL.Image as pil
+import PIL.ImageOps as pilops
 
 from datasets import load_dataset
 from typing import Callable, Optional, Tuple
 from PIL.Image import Image
-from PIL.ImageOps import pad, grayscale
 from torch import Tensor
 from torch.utils.data import Dataset
 
@@ -76,9 +76,10 @@ class SmithsonianButterfliesDataset(Dataset):
 
     The target classes (N=178) are chosen here to be the lowest level of taxonomic classification.
     """
-    def __init__(self, img_size: int, transform: Optional[Callable] = None):
+    def __init__(self, img_size: int, grayscale: bool = True, transform: Optional[Callable] = None):
         self.img_size = img_size
-        self.data = load_dataset("ceyda/smithsonian_butterflies", num_proc=2)['train']
+        self.grayscale = grayscale
+        self.data = load_dataset("huggan/smithsonian_butterflies_subset", num_proc=2)['train']
         self.transform = transform
         self.str_to_int, self.n_labels = self.setup_labels_map()
 
@@ -101,10 +102,12 @@ class SmithsonianButterfliesDataset(Dataset):
 
         # preprocess
         # WARNING: the image is not cropped as the ruler is put in different places and cannot be reliably removed
-        img = grayscale(img)
-        # w, h = img.size
-        # img = img.crop((0, 0, 1600, h))     # remove the ruler from the image
-        img = pad(image=img, size=(self.img_size, self.img_size), color=255)    # pad with white
+        if self.grayscale:
+            img = pilops.grayscale(img)
+            color = 255
+        else:
+            color = (255, 255, 255)
+        img = pilops.pad(image=img, size=(self.img_size, self.img_size), color=color)    # pad with white
 
         if self.transform:
             img = self.transform(img)
