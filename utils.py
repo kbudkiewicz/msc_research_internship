@@ -2,9 +2,12 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from typing import Iterable, Optional
+import torch
+
+from typing import Iterable, Optional, Union
 from torch import Tensor
 from torch.nn import Module
+from mpl_toolkits.axes_grid1 import ImageGrid
 
 
 def change_filename_if_taken(path: str | os.PathLike, file_name: str | os.PathLike) -> str | os.PathLike:
@@ -12,23 +15,21 @@ def change_filename_if_taken(path: str | os.PathLike, file_name: str | os.PathLi
     Check if a given filename on a given path is taken. If it is, recursively add an iterator.
     """
     file_path = os.path.join(path, file_name)
-    if os.path.isfile(file_path):
-        addon = 0
+    if os.path.exists(file_path):
+        idx = 0
+        path, extension = os.path.splitext(file_path)
         while os.path.isfile(file_path):
-            name, format_ = file_name.split('.')
-            name += f'_{addon}'
-            file_name = f'{name}.{format_}'
-            file_path = os.path.join(path, file_name)
-            addon += 1
+            file_path = path + f'_{idx}' + extension
+            idx += 1
     return file_path
 
 
 def compare_imgs(
-        original: Tensor,
-        reconstructed: Tensor,
-        show_plot: bool = False,
-        labels: Optional[Tensor] = None,
-    ):
+    original: Tensor,
+    reconstructed: Tensor,
+    show_plot: bool = False,
+    labels: Optional[Tensor] = None,
+):
     """
     Args:
         original (Tensor): Batch of original images from validation set.
@@ -41,15 +42,6 @@ def compare_imgs(
     assert original.shape == reconstructed.shape, 'Shapes mismatch. Make sure all tensors have the same shape.'
     b, *_ = original.shape
     assert b == len(labels), 'Batch size and the number of labels mismatch.'
-
-    # fig, axes = plt.subplots(b, 2, figsize=(4, 2*b), tight_layout=True, sharex=True, sharey=True)
-    # axes[0, 0].set_title('Original')
-    # axes[0, 1].set_title('Reconstructed')
-    # for i, ax in enumerate(axes):
-    #     ax[0].imshow(original[i])
-    #     ax[1].imshow(reconstructed[i])
-    #     if labels is not None:
-    #         ax[0].set_ylabel(f'Label: {labels[i].item()}')
 
     fig, axes = plt.subplots(2, b, figsize=(2*b, 4), tight_layout=True, sharex=True, sharey=True)
     axes[0, 0].set_ylabel('Original')
@@ -66,9 +58,7 @@ def compare_imgs(
         return fig
 
 
-def plot_reverse_process(
-        x: Tensor,
-    ):
+def plot_reverse_process(x: Tensor):
     """
     Visualize the reverse process.
 
@@ -105,7 +95,7 @@ def plot_variable_guidance_scale(
         raise ValueError(f'Invalid guidance_scale value: {guidance_scale}')
 
     model = model.eval()
-    fig = plt.figure(figsize=(16, 6))
+    fig = plt.figure(figsize=(12, 4))
     grid = ImageGrid(fig, 111, nrows_ncols=(len(labels), len(guidance_scale)), axes_pad=0)
 
     imgs = []

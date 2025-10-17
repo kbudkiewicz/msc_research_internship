@@ -4,7 +4,6 @@ import torch.nn as nn
 
 from torch import Tensor
 from typing import Optional
-from configs import BaseUnetConfig
 
 
 class MlpBlock(nn.Module):
@@ -178,7 +177,8 @@ class MultiHeadAttention(nn.Module):
         embed_dim (int): Embedding dimension (D) of the module. Is later split into multiple heads with dimensions
             ``embed_dim//num_heads``
         n_heads (int): Number of attention heads (H).
-        dropout_rate (float): Dropout probability. Default: ``0.0`` (no dropout).
+        dropout_rate (float): Dropout probability.
+        device (optional, torch.device, str): Device used for computation.
     """
     def __init__(
         self,
@@ -324,13 +324,12 @@ class ConvBlock(nn.Module):
         out_channels: int,
         activation: nn.Module = nn.SiLU,
         device: Optional[torch.device | str] = None,
-        **conv_kwargs,
     ):
         super().__init__()
         self.net = nn.Sequential(
             activation(),
             nn.BatchNorm2d(in_channels),
-            nn.Conv2d(in_channels, out_channels, **conv_kwargs),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
         )
         if device:
             self.to(device)
@@ -342,7 +341,7 @@ class ConvBlock(nn.Module):
         return self.net(x)
 
 
-class ResBlock(nn.Module, BaseUnetConfig):
+class ResBlock(nn.Module):
     r"""
     Base class for residual blocks.
 
@@ -366,8 +365,8 @@ class ResBlock(nn.Module, BaseUnetConfig):
         super().__init__()
         assert 0. <= res_weight <= 1., 'res_weight must be between 0 and 1'
 
-        self.in_block = ConvBlock(channels, channels, **self.conv_kwargs)
-        self.out_block = ConvBlock(channels, channels, **self.conv_kwargs)
+        self.in_block = ConvBlock(channels, channels)
+        self.out_block = ConvBlock(channels, channels)
         self.time_adapter = nn.Sequential(
             nn.Linear(t_dim, t_dim),
             nn.SiLU(),
@@ -435,7 +434,7 @@ class Rescaler(nn.Module):
                 nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             )
         else:
-            self.downsample = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
+            self.downsample = nn.Conv2d(in_channels, out_channels, kernel_size=2, stride=2, padding=0)
 
     def forward(self, x: Tensor, t_embd: Tensor, labels_embd: Tensor) -> Tensor:
         """

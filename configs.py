@@ -42,6 +42,7 @@ class VitBase:
     dropout_rate: float = 0.0
 
 
+@dataclass
 class MyVit(VitBase):
     n_labels: int = 4
     patch_size: int = 16

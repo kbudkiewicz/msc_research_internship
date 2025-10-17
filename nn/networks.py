@@ -156,7 +156,7 @@ class VisionTransformer(nn.Module):
     def __init__(
         self,
         img_size: int,
-        in_channels: int,
+        in_dim: int,
         depth_encoder: int = 5,
         patch_size: int = 16,
         embed_dim: int = 256,
@@ -166,7 +166,8 @@ class VisionTransformer(nn.Module):
         device: Optional[Union[torch.device, str]] = None,
     ):
         super().__init__()
-        self.in_channels = in_channels
+        self.in_dim = in_dim
+        self.depth_encoder = depth_encoder
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.n_heads = n_heads
@@ -188,18 +189,14 @@ class VisionTransformer(nn.Module):
             nn.Linear(self.embed_dim, self.embed_dim),
             nn.GELU()
         )
-        self.patch_embd = nn.Conv2d(self.in_channels, self.embed_dim, self.patch_size, self.patch_size)
+        self.patch_embd = nn.Conv2d(self.in_dim, self.embed_dim, self.patch_size, self.patch_size)
         self.encoder = nn.ModuleList(
-            ReZeroEncoderBlock(
-                embed_dim=self.embed_dim,
-                n_heads=self.n_heads,
-                dropout_rate=self.dropout_rate
-            )
+            ReZeroEncoderBlock(embed_dim=self.embed_dim, n_heads=self.n_heads, dropout_rate=self.dropout_rate)
             for _ in range(depth_encoder)
         )
         self.out_proj = nn.Sequential(
             nn.LayerNorm(self.embed_dim),
-            nn.Linear(self.embed_dim, self.in_channels * self.patch_size**2),
+            nn.Linear(self.embed_dim, self.in_dim * self.patch_size ** 2),
         )
 
         self.config = self.get_config()
@@ -248,14 +245,15 @@ class VisionTransformer(nn.Module):
         """
         b, *_ = img.shape
         h = w = int(sqrt(self.n_patches * self.patch_size**2))
-        img = img.contiguous().view(b, self.in_channels, h, w)
+        img = img.contiguous().view(b, self.in_dim, h, w)
 
         return img
 
     def get_config(self) -> dict:
         return {
             'n_labels': self.n_labels,
-            'in_channels': self.in_channels,
+            'in_channels': self.in_dim,
+            'depth_encoder': self.depth_encoder,
             'patch_size': self.patch_size,
             'n_patches': self.n_patches,
             'embed_dim': self.embed_dim,
@@ -264,7 +262,7 @@ class VisionTransformer(nn.Module):
         }
 
 
-class FlowMatchingNet(CustomModel):
+class FlowMatchingNet(BaseModel):
     """
     Flow Matching Net.
 
@@ -295,6 +293,7 @@ class FlowMatchingNet(CustomModel):
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=weight_decay)
         if device:
             self.net.to(device)
+            self.net.device = device
             self.to(device)
 
     def forward(self, x_t: Tensor, t: Tensor, labels: Tensor) -> Tensor:
@@ -332,7 +331,7 @@ class FlowMatchingNet(CustomModel):
             raise TypeError(f'label must be Tensor but is {type(label)}')
 
         timesteps = torch.linspace(0., 1., n_steps + 1, device=self.device).unsqueeze(-1)
-        img = torch.randn([1, 1, img_size, img_size], device=self.device)
+        img = torch.randn([1, self.net.in_dim, img_size, img_size], device=self.device)
 
         for i in range(n_steps):
             img = self.step(img, timesteps[i], timesteps[i + 1], label, guidance_scale=guidance_scale)
@@ -371,7 +370,7 @@ class FlowMatchingNet(CustomModel):
         return x1
 
 
-class DiffusionNet(CustomModel):
+class DiffusionNet(BaseModel):
     """
     Base class for diffusion networks. The following implementation is heavily based on
     `Denoising Diffusion Probability Models <https://arxiv.org/abs/2006.11239>`_.
@@ -416,6 +415,7 @@ class DiffusionNet(CustomModel):
 
         if device:
             self.net.to(device)
+            self.net.device = device
             self.to(device)
 
     def register_schedule(self, timesteps: int, betas: Union[float, int]):
@@ -513,7 +513,7 @@ class DiffusionNet(CustomModel):
         if isinstance(label, int):
             label = torch.tensor([label], dtype=torch.long, device=self.device)
         if not isinstance(x_t, Tensor):
-            x_t = torch.rand([1, 1, img_size, img_size], device=self.device)
+            x_t = torch.rand([1, self.net.in_dim, img_size, img_size], device=self.device)
 
         for t in reversed(range(n_steps)):
             t = torch.tensor([t], dtype=torch.long, device=self.device)
@@ -535,11 +535,3 @@ class DiffusionNet(CustomModel):
         while out.ndim < desired_shape.ndim:
             out = out.unsqueeze(-1)
         return out
-
-    @staticmethod
-    def rescale(x: Tensor) -> Tensor:
-        """
-        Rescale linearly to [-1, 1].
-        """
-        frac = (x - x.min()) / (x.max() - x.min())
-        return frac * 2 - 1

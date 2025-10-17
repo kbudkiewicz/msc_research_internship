@@ -14,18 +14,18 @@ from utils import compare_imgs, EarlyStopper
 
 from torch.nn.functional import mse_loss
 from torch.utils.data import DataLoader, ConcatDataset, random_split
-from torchvision.transforms.v2 import Compose, RandomRotation, GaussianBlur, ToImage, ToDtype
+from torchvision.transforms.v2 import Compose, ToImage, ToDtype, RandomHorizontalFlip
 from torchvision.utils import save_image
 load_dotenv()
 
 
 @torch.no_grad()
 def validate(
-        model: FlowMatchingNet,
-        epoch: int,
-        val_loader: DataLoader,
-        run_name: str,
-    ):
+    model: FlowMatchingNet,
+    epoch: int,
+    val_loader: DataLoader,
+    run_name: str,
+):
     """
     Validate the model on the validation set.
     """
@@ -57,7 +57,8 @@ def validate(
     # compare first 8 samples of the last batch
     if epoch % 10 == 0:
         img_size = x1.shape[-1]
-        for n_steps in {1, 10, 100}:
+        timesteps = {10, 100, 500, 1000} if mode == 'diffusion' else {5, 10, 50, 100}
+        for n_steps in timesteps:
             print(f'Sampling {n_steps} steps...')
             img = model.sample_img(
                 img_size=img_size, n_steps=n_steps, label=torch.tensor([1], dtype=torch.long, device=model.device)
@@ -71,20 +72,20 @@ def validate(
 
 
 def train(
-        dataset,
-        net: torch.nn.Module,
-        img_size: int,
-        epochs: int = 1,
-        batch_size: int = 64,
-        lr: float = 5e-4,
-        weight_decay: float = 0.,
-        path: str | os.PathLike = './checkpoints',
-        mode: str = 'flow-matching',
-        augmented: bool = True,
-        patience: Optional[int] = None,
-        config: Optional[object] = None,
-        mlflow_config: Optional[object] = None,
-    ) -> None:
+    dataset,
+    net: torch.nn.Module,
+    img_size: int,
+    epochs: int = 1,
+    batch_size: int = 64,
+    lr: float = 5e-4,
+    weight_decay: float = 0.,
+    path: str | os.PathLike = './checkpoints',
+    mode: str = 'flow-matching',
+    augmented: bool = True,
+    patience: Optional[int] = None,
+    config: Optional[object] = None,
+    mlflow_config: Optional[object] = None,
+) -> None:
     """
     Train a model.
 
@@ -95,12 +96,13 @@ def train(
         epochs (int): Number of training epochs. One epoch is equivalent to a full iteration over the dataset.
         batch_size (int): Batch size.
         lr (float): Learning rate.
+        weight_decay (float): L2 gradient regularization strength.
         path (str, os.PathLike): Path to directory where checkpoints and weights will be saved.
+        mode (str): Type of model to be trained. Either `flow-matching` or `diffusion`.
         augmented (bool). Whether to augment the training set with additional samples. Adds rotated and blurred samples.
         patience (int, optional): Patience for early stopping.
         config (object, optional): Configuration of model parameters
         mlflow_config (object, optional): Config class of Mlflow experiment.
-        mode (str): Type of model to be trained. Either `flow-matching` or `diffusion`.
     """
     run_name = mode + '_' + f'{net.__class__.__name__}'.lower() + f'_{img_size}'
     experiment_path = os.path.join(path, run_name)
@@ -130,7 +132,7 @@ def train(
         # seed for a reproducible validation set
     )
     if augmented:
-        for transform in [GaussianBlur(kernel_size=9, sigma=3.), RandomRotation(30)]:
+        for transform in {RandomHorizontalFlip(1)}:
             augmented_transform = Compose([transform, basic_transform])
             augmented_data = dataset(img_size=img_size, transform=augmented_transform)
             training_data = ConcatDataset([training_data, augmented_data])
@@ -153,9 +155,10 @@ def train(
         'img_size': img_size,
         'batch_size': batch_size,
         'learning_rate': lr,
+        'weight_decay': weight_decay,
         'patience': patience,
         'epochs': epochs,
-        'dataset': dataset.__class__.__name__,
+        'dataset': dataset.__name__,
         'augmented': augmented,
         'device': model.device,
     })
@@ -192,10 +195,7 @@ def train(
             mean_train_loss = torch.mean(train_loss)
             mean_val_loss = validate(model, epoch, val_loader, run_name)
             mlflow.log_metrics(
-                {
-                    'mean_train_loss': mean_train_loss.item(),
-                    'mean_val_loss': mean_val_loss.item()
-                }, step=epoch
+                {'mean_train_loss': mean_train_loss.item(), 'mean_val_loss': mean_val_loss.item()}, step=epoch
             )
             if epoch % ceil(0.1 * epochs) == 0:
                 mlflow.pytorch.log_model(
@@ -231,22 +231,19 @@ def train(
 
 if __name__ == '__main__':
     # NOTE: if CUDA does not have enough memory, try reducing batch size to make the data fit
-    # FM & DM VIT128:
-    # VisionTransformer(
-    #     img_size=img_size,
-    #     in_channels=1,
-    #     depth_encoder=12,
-    #     n_heads=16,
-    #     patch_size=16,
-    #     embed_dim=512, # or 1024
-    #     dropout_rate=0.1,
-    # )
-    img_size = 256
+
+    img_size = 128
     mode = 'flow-matching'  # 'diffusion' or 'flow-matching
     dataset = SmithsonianButterfliesDataset
-    net = Unet(16, 32, 64, 128, embed_dim=64)  # 32, ..., 512 best for MRI,
+    net = Unet(64, 128, 256, 512, embed_dim=64, in_dim=3, out_dim=3)
+               # n_labels=dataset.n_labels)  # 32, ..., 512 best for MRI,
+    # net = VisionTransformer(
+    #     img_size=img_size, in_channels=1, depth_encoder=12,
+    #     n_heads=16, patch_size=16, embed_dim=512,   # or 1024
+    #     dropout_rate=0.1,
+    # )
 
     train(
-        dataset=dataset, net=net, img_size=img_size, mode=mode, lr=1e-5, epochs=50, patience=0, augmented=True,
-        mlflow_config=MlflowConfig,
+        dataset=dataset, net=net, img_size=img_size, mode=mode, batch_size=32, lr=1e-4,     # weight_decay=1e-2,
+        epochs=1000, patience=0, augmented=True, mlflow_config=MlflowConfig,
     )
